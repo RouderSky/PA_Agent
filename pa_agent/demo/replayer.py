@@ -13,33 +13,7 @@ _CHAR_MS = 16
 _STAGE_GAP_MS = 450
 
 
-def _reasoning_from_response(response: dict | None) -> str:
-    """Extract thinking text from API-shaped or persisted record-shaped payloads."""
-    if not isinstance(response, dict):
-        return ""
-    # PendingWriter / DeepSeek flat shape: reasoning_content next to content, id, …
-    top = response.get("reasoning_content")
-    if isinstance(top, str) and top.strip():
-        return top
-    choices = response.get("choices") or []
-    if not choices:
-        return ""
-    msg = choices[0].get("message") or {}
-    return str(msg.get("reasoning_content") or "")
-
-
-def _content_from_response(response: dict | None) -> str:
-    """Extract answer text (e.g. Stage 2 JSON) from a persisted API response."""
-    if not isinstance(response, dict):
-        return ""
-    top = response.get("content")
-    if isinstance(top, str) and top.strip():
-        return top
-    choices = response.get("choices") or []
-    if not choices:
-        return ""
-    msg = choices[0].get("message") or {}
-    return str(msg.get("content") or "")
+from pa_agent.ai.response_extract import content_from_response, reasoning_from_response
 
 
 def _prompt_parts(messages: list[dict] | None, *, last_user: bool = False) -> tuple[str, str]:
@@ -94,9 +68,9 @@ class DemoReplayer(QObject):
 
         s1_sys, s1_user = _prompt_parts(r.stage1_messages)
         s2_sys, s2_user = _prompt_parts(r.stage2_messages, last_user=True)
-        s1_reason = _reasoning_from_response(r.stage1_response)
-        s2_reason = _reasoning_from_response(r.stage2_response)
-        s2_content = _content_from_response(r.stage2_response)
+        s1_reason = reasoning_from_response(r.stage1_response)
+        s2_reason = reasoning_from_response(r.stage2_response)
+        s2_content = content_from_response(r.stage2_response)
         strategy = list(r.strategy_files_used or [])
 
         def add(delay: int, fn: Callable[[], None]) -> None:

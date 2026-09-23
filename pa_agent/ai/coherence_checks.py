@@ -9,6 +9,9 @@ logger = logging.getLogger(__name__)
 
 from pa_agent.ai.decision_tree import normalize_bar_range, validate_bar_range_field
 
+# Target bar count for bar_by_bar_summary when the analysis window has enough bars.
+BAR_BY_BAR_TARGET_COUNT = 5
+
 # Stage-one gate nodes required when gate_result=proceed (prompt §0–§2).
 STAGE1_MANDATORY_GATE_NODES: tuple[str, ...] = (
     "1.1",
@@ -377,17 +380,13 @@ def validate_stage1_coherence(
         n_bars = _max_bar_seq(kline_frame)
         count = len(summary)
         if n_bars is not None and n_bars > 0:
-            expected_min = min(8, n_bars) if n_bars >= 8 else n_bars
-            expected_max = min(12, n_bars)
-            if count < expected_min:
+            target = BAR_BY_BAR_TARGET_COUNT
+            expected = min(target, n_bars)
+            if count != expected:
                 errors.append(
                     f"bar_by_bar_summary has {count} items; "
-                    f"expected at least {expected_min} for {n_bars} bars"
-                )
-            if count > expected_max:
-                errors.append(
-                    f"bar_by_bar_summary has {count} items; "
-                    f"expected at most {expected_max}"
+                    f"expected exactly {expected} for {n_bars} bars "
+                    f"(K5–K1 when ≥{target} bars)"
                 )
         elif count < 1:
             errors.append("bar_by_bar_summary must not be empty")

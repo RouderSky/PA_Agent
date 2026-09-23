@@ -48,6 +48,8 @@ class AISidebar(QWidget):
         if settings is not None:
             self.bind_settings(settings)
 
+        self._tabs.currentChanged.connect(self._on_tab_changed)
+
         layout = QVBoxLayout(self)
         layout.setContentsMargins(0, 0, 0, 0)
         layout.addWidget(self._tabs)
@@ -67,6 +69,10 @@ class AISidebar(QWidget):
     def focus_decision_flow_viz(self) -> None:
         """Switch to the decision flow visualization tab."""
         self._tabs.setCurrentIndex(self.TAB_DECISION_FLOW)
+
+    def _on_tab_changed(self, index: int) -> None:
+        if index == self.TAB_DECISION_FLOW:
+            self.decision_flow_viz.schedule_refit_view()
 
     def focus_decision(self) -> None:
         """Switch to the trading decision tab."""

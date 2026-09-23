@@ -152,3 +152,21 @@ class TestSavePartialSanitizes:
         path = writer.save_partial(record, reason="timeout")
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["_partial_reason"] == "timeout"
+
+    def test_exception_partial_reason_mirrored(self, tmp_path):
+        record = _make_record("sk-test")
+        record = record.model_copy(
+            update={
+                "exception": {
+                    "type": "validation_error",
+                    "stage": "stage2",
+                    "category": "c",
+                    "message": "bad field",
+                }
+            }
+        )
+        writer = PendingWriter(pending_dir=tmp_path)
+        path = writer.save_partial(record, reason="stage2_c")
+        data = json.loads(path.read_text(encoding="utf-8"))
+        assert data["_partial_reason"] == "stage2_c"
+        assert data["exception"]["partial_reason"] == "stage2_c"

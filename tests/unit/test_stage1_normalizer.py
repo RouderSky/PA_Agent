@@ -37,6 +37,37 @@ def test_maps_recommended_strategy_files() -> None:
     assert out["strategy_files_needed"] == ["下跌通道分析识别.txt"]
 
 
+def test_repair_gate_result_unknown_to_proceed_when_13_not_chaotic() -> None:
+    """§1.3 answer=否 (not chaotic) must not block unknown→proceed repair."""
+    from pa_agent.ai.trace_normalize import _repair_gate_result
+
+    obj = {
+        "gate_result": "unknown",
+        "gate_trace": [
+            {"node_id": "1.2", "answer": "是"},
+            {"node_id": "1.3", "answer": "否"},
+            {"node_id": "2.5", "answer": "中性"},
+        ],
+    }
+    _repair_gate_result(obj)
+    assert obj["gate_result"] == "proceed"
+
+
+def test_repair_gate_result_keeps_unknown_when_13_chaotic() -> None:
+    from pa_agent.ai.trace_normalize import _repair_gate_result
+
+    obj = {
+        "gate_result": "unknown",
+        "gate_trace": [
+            {"node_id": "1.2", "answer": "是"},
+            {"node_id": "1.3", "answer": "是"},
+            {"node_id": "2.5", "answer": "否"},
+        ],
+    }
+    _repair_gate_result(obj)
+    assert obj["gate_result"] == "unknown"
+
+
 def test_repair_gate_23_neutral_answer_with_bearish_branch() -> None:
     """Regression: answer=中性 but branch/direction bearish (model conflates enums)."""
     raw = {**VALID_STAGE1, "direction": "bearish"}
@@ -213,6 +244,33 @@ def test_normalize_signal_bar_null_infers_from_summary() -> None:
     assert isinstance(result, Ok)
 
 
+def test_normalize_signal_bar_quality_null_when_bar_null() -> None:
+    """Regression: bar=null with quality=null fails schema; coerce to invalid."""
+    import json
+
+    from pa_agent.ai.json_validator import Ok
+
+    raw = {**VALID_STAGE1}
+    raw["bar_analysis"] = {
+        "always_in": "neutral",
+        "last_closed_bar": "K1",
+        "bar_type": "inside",
+        "signal_bar": {
+            "bar": None,
+            "quality": None,
+            "reason": "当前无有效信号棒，K2空头信号后K1反弹未确认",
+        },
+        "entry_setup_type": "none",
+        "follow_through": "pending",
+    }
+    out = normalize_stage1(raw)
+    sb = out["bar_analysis"]["signal_bar"]
+    assert sb["quality"] == "invalid"
+
+    result = schema_test_validator().validate("stage1", json.dumps(out, ensure_ascii=False))
+    assert isinstance(result, Ok)
+
+
 def test_normalize_bar_type_ine_truncation_passes_schema() -> None:
     """Regression: models truncate inside→ine in bar_analysis.bar_type."""
     import json
@@ -246,7 +304,21 @@ def test_normalize_bar_type_ine_truncation_passes_schema() -> None:
     assert isinstance(result, Ok)
 
 
-def test_pad_bar_by_bar_summary_when_model_only_sends_five_bars() -> None:
+def test_normalize_bar_by_bar_role_reversal_attempt_maps_to_signal() -> None:
+    raw = {
+        **VALID_STAGE1,
+        "bar_by_bar_summary": [
+            {
+                **VALID_STAGE1["bar_by_bar_summary"][0],
+                "role": "reversal_attempt",
+            }
+        ],
+    }
+    out = normalize_stage1(raw)
+    assert out["bar_by_bar_summary"][0]["role"] == "signal"
+
+
+def test_pad_bar_by_bar_summary_when_model_only_sends_three_bars() -> None:
     n = 100
     frame = KlineFrame(
         symbol="XAUUSD",
@@ -273,12 +345,12 @@ def test_pad_bar_by_bar_summary_when_model_only_sends_five_bars() -> None:
     summary = [
         {"bar": f"K{i}", "role": "structure", "bar_type": "doji", "context_effect": "neutral",
          "follow_through": "no", "trapped_side": "none", "reason": f"棒K{i}"}
-        for i in (5, 4, 3, 2, 1)
+        for i in (3, 2, 1)
     ]
     out = normalize_stage1({"bar_by_bar_summary": summary}, kline_frame=frame)
-    assert len(out["bar_by_bar_summary"]) == 8
+    assert len(out["bar_by_bar_summary"]) == 5
     bars = [item["bar"] for item in out["bar_by_bar_summary"]]
-    assert bars == [f"K{i}" for i in range(8, 0, -1)]
+    assert bars == [f"K{i}" for i in range(5, 0, -1)]
     errs = validate_stage1_coherence(
         {**VALID_STAGE1, "bar_by_bar_summary": out["bar_by_bar_summary"]},
         kline_frame=frame,
@@ -312,3 +384,138 @@ def test_fill_incremental_delta_from_risk_warning() -> None:
     assert len(delta["summary"]) >= 16
     assert "direction" in delta["changed_fields"]
     assert "cycle_position" in delta["changed_fields"]
+
+
+def test_normalize_bar_by_bar_trapped_side_null() -> None:
+    raw = {
+        "bar_by_bar_summary": [
+            {
+                "bar": "K2",
+                "role": "structure",
+                "bar_type": "doji",
+                "context_effect": "neutral",
+                "follow_through": "no",
+                "trapped_side": None,
+                "reason": "test",
+            }
+        ]
+    }
+    out = normalize_stage1(raw)
+    assert out["bar_by_bar_summary"][0]["trapped_side"] == "none"
+
+
+def test_normalizes_breakout_test_role_and_strengthens_bash_typo() -> None:
+    raw = {
+        "bar_by_bar_summary": [
+            {
+                "bar": "K3",
+                "role": "breakout_test",
+                "bar_type": "doji",
+                "context_effect": "strengthens_bash",
+                "follow_through": "no",
+                "trapped_side": "none",
+                "reason": "回测突破位",
+            },
+            {
+                "bar": "K2",
+                "role": "trend_bull",
+                "bar_type": "trend_bull",
+                "context_effect": "neutral",
+                "follow_through": "yes",
+                "trapped_side": "bulls",
+                "reason": "趋势棒",
+            },
+        ]
+    }
+    out = normalize_stage1(raw)
+    assert out["bar_by_bar_summary"][0]["role"] == "test"
+    assert out["bar_by_bar_summary"][0]["context_effect"] == "strengthens_bear"
+    assert out["bar_by_bar_summary"][1]["role"] == "structure"
+
+
+# ── Rescue: pattern name mis-placed in cycle_position ─────────────────────────
+
+def test_rescue_descending_triangle_from_cycle_position() -> None:
+    """Regression: model outputs cycle_position='descending_triangle' instead of
+    adding it to detected_patterns with cycle_position set to a valid state."""
+    from pa_agent.ai.stage1_normalizer import _rescue_pattern_from_cycle_position
+
+    obj: dict = {
+        "cycle_position": "descending_triangle",
+        "detected_patterns": [],
+    }
+    rescued = _rescue_pattern_from_cycle_position(obj)
+
+    assert rescued is True
+    assert obj["cycle_position"] == "trading_range"
+    assert "descending_triangle" in obj["detected_patterns"]
+
+
+def test_rescue_does_not_alter_valid_cycle_position() -> None:
+    from pa_agent.ai.stage1_normalizer import _rescue_pattern_from_cycle_position
+
+    obj: dict = {"cycle_position": "broad_channel", "detected_patterns": []}
+    rescued = _rescue_pattern_from_cycle_position(obj)
+
+    assert rescued is False
+    assert obj["cycle_position"] == "broad_channel"
+    assert obj["detected_patterns"] == []
+
+
+def test_rescue_all_triangle_variants() -> None:
+    from pa_agent.ai.stage1_normalizer import _rescue_pattern_from_cycle_position
+
+    triangles = [
+        "ascending_triangle",
+        "descending_triangle",
+        "symmetrical_triangle",
+        "expanding_triangle",
+    ]
+    for triangle in triangles:
+        obj: dict = {"cycle_position": triangle, "detected_patterns": []}
+        rescued = _rescue_pattern_from_cycle_position(obj)
+        assert rescued is True, f"Expected rescue for {triangle}"
+        assert obj["cycle_position"] == "trading_range"
+        assert triangle in obj["detected_patterns"]
+
+
+def test_rescue_preserves_existing_detected_patterns() -> None:
+    from pa_agent.ai.stage1_normalizer import _rescue_pattern_from_cycle_position
+
+    obj: dict = {
+        "cycle_position": "descending_triangle",
+        "detected_patterns": ["breakout_failure"],
+    }
+    _rescue_pattern_from_cycle_position(obj)
+
+    assert "breakout_failure" in obj["detected_patterns"]
+    assert "descending_triangle" in obj["detected_patterns"]
+
+
+def test_normalize_stage1_rescues_descending_triangle_end_to_end() -> None:
+    """Full normalize_stage1 pipeline: pattern rescued, triangle strategy file loaded."""
+    raw = {
+        **VALID_STAGE1,
+        "cycle_position": "descending_triangle",
+        "direction": "bearish",
+        "detected_patterns": [],
+    }
+    # Remove pre-set strategy_files_needed so the router recalculates after rescue.
+    raw.pop("strategy_files_needed", None)
+
+    out = normalize_stage1(raw)
+
+    assert out["cycle_position"] == "trading_range"
+    assert "descending_triangle" in out["detected_patterns"]
+    # Router should have loaded the triangle strategy file as a pattern overlay.
+    assert "文件27-三角形与收敛形态.txt" in out["strategy_files_needed"]
+
+
+def test_rescue_wedge_fallback_is_broad_channel() -> None:
+    from pa_agent.ai.stage1_normalizer import _rescue_pattern_from_cycle_position
+
+    obj: dict = {"cycle_position": "wedge", "detected_patterns": []}
+    _rescue_pattern_from_cycle_position(obj)
+
+    assert obj["cycle_position"] == "broad_channel"
+    assert "wedge" in obj["detected_patterns"]

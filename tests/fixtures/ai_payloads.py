@@ -25,6 +25,7 @@ VALID_STAGE2_NO_ORDER = {
         "order_type": "不下单",
         "entry_price": None,
         "take_profit_price": None,
+        "take_profit_price_2": None,
         "stop_loss_price": None,
         "reasoning": "No clear setup",
         "diagnosis_confidence": 60,

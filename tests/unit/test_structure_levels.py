@@ -82,3 +82,47 @@ def test_normalize_stage1_applies_support_resistance_refresh() -> None:
     assert "64353" not in (out.get("resistance_levels") or [])
     assert out["resistance_levels"]
     assert out["support_levels"]
+
+
+def test_merge_sorts_support_near_to_far() -> None:
+    """Swing refill must not append nearest pivots at the tail (chart uses farthest)."""
+    from pa_agent.ai.structure_levels import _merge_level_texts
+
+    merged = _merge_level_texts(
+        ["4139", "4121"],
+        [4174.938],
+        tick=0.001,
+        max_levels=3,
+        kind="support",
+    )
+    assert merged[0] == "4174.938"
+    assert merged[-1] == "4121"
+    assert "4139" in merged
+
+
+def test_merge_keeps_farthest_ai_when_swings_cluster() -> None:
+    from pa_agent.ai.structure_levels import _merge_level_texts
+
+    merged = _merge_level_texts(
+        ["4139", "4121"],
+        [4147.8, 4147.4, 4147.1],
+        tick=0.001,
+        max_levels=3,
+        kind="support",
+    )
+    assert merged[0] == "4147.8"
+    assert merged[-1] == "4121"
+    assert "4139" in merged
+
+
+def test_merge_sorts_resistance_near_to_far() -> None:
+    from pa_agent.ai.structure_levels import _merge_level_texts
+
+    merged = _merge_level_texts(
+        ["4200", "4221"],
+        [4178.69],
+        tick=0.001,
+        max_levels=3,
+        kind="resistance",
+    )
+    assert merged == ["4178.69", "4200", "4221"]

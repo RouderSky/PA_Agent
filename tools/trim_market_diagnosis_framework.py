@@ -139,7 +139,7 @@ def main() -> None:
     )
     text = text.replace(
         "- 周期位置变化时，立即调整对应决策（参考\"周期转换时的决策调整规则\"）",
-        "- 周期位置变化时，更新 cycle_position、direction、strategy_files_needed，必要时 gate_result=wait",
+        "- 周期位置变化时，更新 cycle_position、direction、strategy_files_needed（§2.5 惯性不足不单独设 gate_result=wait，见二元决策 §2.5）",
     )
 
     # Remove entire 【实战规则】

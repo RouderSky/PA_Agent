@@ -29,8 +29,6 @@ def prepare_stage2_for_ui(
     out = copy.deepcopy(s2_full)
     from pa_agent.ai.stage2_normalizer import ensure_stage2_predictions
 
-    # When next-bar prediction is disabled, remove it entirely so it won't
-    # appear in the UI even if the model happened to output it.
     if skip_next_bar:
         out.pop("next_bar_prediction", None)
 

@@ -168,6 +168,15 @@ def test_invalid_enum_value_is_category_c():
     assert result.category == "c"
 
 
+def test_stage1_bar_role_reversal_attempt_is_normalized():
+    """reversal_attempt in bar_by_bar_summary.role maps to signal before schema check."""
+    obj = _valid_stage1()
+    obj["bar_by_bar_summary"][0]["role"] = "reversal_attempt"
+    result = lenient_validator.validate("stage1", json.dumps(obj))
+    assert isinstance(result, Ok), f"Expected Ok, got {result}"
+    assert result.obj["bar_by_bar_summary"][0]["role"] == "signal"
+
+
 def test_stage1_bar_role_alias_is_normalized():
     """Common bar_by_bar_summary role aliases are accepted and normalized."""
     obj = _valid_stage1()

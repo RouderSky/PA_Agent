@@ -23,14 +23,15 @@ dependencies = [
     "tvdatafeed @ git+https://github.com/rongardF/tvdatafeed.git",
     "cryptography>=42",
     "pywin32>=306; sys_platform == 'win32'",
-]
-
-[project.optional-dependencies]
-ashare = [
     "akshare>=1.14",
     "baostock>=0.8",
     "curl_cffi>=0.13",
+    "tushare>=1.4",
+    "cursor-sdk>=0.1.0",
+    "httpx[socks]>=0.27",
 ]
+
+[project.optional-dependencies]
 dev = [
     "pytest>=8",
     "pytest-qt>=4.4",

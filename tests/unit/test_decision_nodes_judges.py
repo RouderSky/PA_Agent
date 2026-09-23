@@ -471,6 +471,26 @@ class TestOverrideArbiter:
         n24 = next((n for n in result if n["node_id"] == "2.4"), None)
         assert not n24.get("overridden_by_ai")
 
+    def test_merge_program_nodes_keeps_ai_primary_without_program_append(self):
+        """AI-primary §1.3/§2.5 keep AI reason; program metrics are not appended."""
+        trace = [
+            {"node_id": "1.3", "question": "AI q", "answer": "否", "reason": "AI混乱判断", "bar_range": "K5-K1"},
+            {"node_id": "2.5", "question": "AI q5", "answer": "是", "reason": "AI", "bar_range": "K1"},
+        ]
+        prog = [
+            {"node_id": "1.3", "question": "程序 q", "answer": "否", "reason": "程序长理由" * 20, "bar_range": "K8-K1"},
+            {"node_id": "2.5", "question": "程序 q5", "answer": "否", "reason": "程序长理由" * 20, "bar_range": "K8-K1"},
+        ]
+        result = merge_program_nodes(trace, prog)
+        node_13 = next((n for n in result if n["node_id"] == "1.3"), None)
+        assert node_13 is not None
+        assert node_13["reason"] == "AI混乱判断"
+        assert "程序参考数据" not in node_13["reason"]
+        node_25 = next((n for n in result if n["node_id"] == "2.5"), None)
+        assert node_25 is not None
+        assert node_25["reason"] == "AI"
+        assert "程序参考数据" not in node_25["reason"]
+
     def test_merge_program_nodes_overrides_ai_nodes(self):
         """merge_program_nodes: program nodes override AI nodes of same node_id."""
         trace = [
@@ -479,6 +499,7 @@ class TestOverrideArbiter:
         ]
         prog = [
             {"node_id": "2.3", "question": "程序 q", "answer": "是", "reason": "程序", "bar_range": "K20-K1", "branch": "bullish"},
+            {"node_id": "2.5", "question": "程序 q5", "answer": "否", "reason": "程序长理由" * 20, "bar_range": "K8-K1"},
         ]
         result = merge_program_nodes(trace, prog)
         node_23 = next((n for n in result if n["node_id"] == "2.3"), None)
@@ -486,8 +507,10 @@ class TestOverrideArbiter:
         assert node_23["answer"] == "是"
         assert node_23["branch"] == "bullish"
         assert node_23["reason"] == "程序"
-        # 2.5 should still be present
-        assert any(n["node_id"] == "2.5" for n in result)
+        node_25 = next((n for n in result if n["node_id"] == "2.5"), None)
+        assert node_25 is not None
+        assert node_25["reason"] == "AI"
+        assert "程序参考数据" not in node_25["reason"]
 
     def test_write_override_trace_sets_fields(self):
         node = {"node_id": "2.3", "answer": "是", "branch": "bullish", "reason": "r", "bar_range": "K1"}
@@ -682,3 +705,120 @@ def test_normalize_stage2_upgrades_9_0_for_planned_limit() -> None:
     out = normalize_stage2(obj, kline_frame=frame, stage1_json=obj["diagnosis_summary"])
     node_90 = next(n for n in out["decision_trace"] if n["node_id"] == "9.0")
     assert node_90["answer"] == "是"
+
+
+def test_11_2_override_preserves_limit_order_without_basis() -> None:
+    """§11.2 maps to 突破单, but planned limits keep null entry_basis_*."""
+    nodes = [
+        {"node_id": "11.1", "question": "q", "answer": "否", "reason": "", "bar_range": "K1"},
+        {"node_id": "11.2", "question": "q", "answer": "否", "reason": "", "bar_range": "K1"},
+    ]
+    out = {
+        "decision": {
+            "order_type": "限价单",
+            "entry_basis_bar": None,
+            "entry_basis_extreme": None,
+            "entry_rule": None,
+        }
+    }
+    overrides = [
+        {
+            "node_id": "11.2",
+            "answer": "是",
+            "override_reason": "trending_tr planned limit pullback, not breakout",
+        },
+    ]
+    apply_overrides(nodes, overrides, out=out, stage="stage2")
+    assert out["decision"]["order_type"] == "限价单"
+
+
+def test_apply_stage2_11_2_override_keeps_limit_order() -> None:
+    """Regression: node_overrides on §11.2 must not force 突破单 without basis fields."""
+    frame = _make_frame(25)
+    out = {
+        "decision": {
+            "order_direction": "做多",
+            "order_type": "限价单",
+            "entry_price": 2002.0,
+            "entry_basis_bar": None,
+            "entry_basis_extreme": None,
+            "entry_rule": None,
+            "take_profit_price": 2015.0,
+            "take_profit_price_2": 2030.0,
+            "stop_loss_price": 1995.0,
+            "reasoning": "planned limit",
+            "diagnosis_confidence": 55,
+            "diagnosis_confidence_reasoning": "x",
+            "trade_confidence": 50,
+            "trade_confidence_reasoning": "x",
+            "estimated_win_rate": 47,
+            "estimated_win_rate_reasoning": "x",
+            "key_factors": [],
+            "watch_points": [],
+            "risk_assessment": "x",
+            "invalidation_condition": "x",
+        },
+        "decision_trace": [
+            {
+                "node_id": "10.3",
+                "section": "风险收益",
+                "question": "交易者方程是否通过？",
+                "answer": "是",
+                "reason": "pass",
+                "bar_range": "K1",
+            },
+        ],
+        "bar_analysis": {
+            "signal_bar": {"bar": "K1", "quality": "medium", "pattern": "tr_boundary"},
+            "entry_bar": {
+                "strength": "not_triggered",
+                "freshness": "pending",
+                "follow_through": True,
+            },
+        },
+        "node_overrides": [
+            {
+                "node_id": "11.2",
+                "answer": "是",
+                "override_reason": "use limit pullback instead of breakout",
+            },
+        ],
+    }
+    stage1 = {
+        "cycle_position": "trending_tr",
+        "direction": "bullish",
+        "gate_result": "proceed",
+    }
+    DecisionNodeEngine.apply_stage2(out, frame, stage1)
+    assert out["decision"]["order_type"] == "限价单"
+    assert out["decision"]["entry_basis_bar"] is None
+
+
+def test_apply_stage2_tolerates_non_dict_stage1_and_decision() -> None:
+    """Regression: string stage1_json/decision must not crash §9/§11 program fill."""
+    frame = _make_frame()
+    out = {
+        "decision": "invalid-string-decision",
+        "decision_trace": [
+            {
+                "node_id": "9.0",
+                "question": "q",
+                "answer": "是",
+                "reason": "test",
+                "bar_range": "K1",
+            },
+            "garbage-trace-entry",
+        ],
+        "bar_analysis": {
+            "signal_bar": {"bar": "K1", "quality": "valid", "pattern": "none"},
+            "entry_bar": {"bar": "K1", "strength": "strong", "freshness": "fresh"},
+        },
+    }
+    stage1_json = "not-a-dict"
+    DecisionNodeEngine.apply_stage2(out, frame, stage1_json)
+
+    assert isinstance(out["decision"], dict)
+    assert all(isinstance(n, dict) for n in out["decision_trace"])
+    node_91 = next((n for n in out["decision_trace"] if n.get("node_id") == "9.1"), None)
+    assert node_91 is not None
+    assert node_91.get("answer") == "是"

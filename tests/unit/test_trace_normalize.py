@@ -20,6 +20,119 @@ def test_fix_reversed_bar_range() -> None:
     assert fix_bar_range_string("K50-K1") == "K50-K1"
 
 
+def test_normalize_trace_item_maps_zhongli_to_neutral() -> None:
+    item = {
+        "node_id": "2.2",
+        "question": "长程大背景方向与近期方向的关系？",
+        "answer": "中立",
+        "reason": "test",
+        "bar_range": "K40-K1",
+    }
+    normalize_trace_item(item, normalization_mode="strict")
+    assert item["answer"] == "中性"
+
+
+def test_gate_22_conflict_answer_mapped_to_yes() -> None:
+    from pa_agent.ai.trace_normalize import normalize_stage1_traces
+
+    obj = {
+        "gate_result": "proceed",
+        "gate_trace": [
+            {
+                "node_id": "2.2",
+                "question": "长程大背景方向与近期方向的关系？",
+                "answer": "冲突",
+                "branch": "neutral_background",
+                "reason": "长程空头背景，近期多头",
+                "bar_range": "K100-K1",
+            },
+        ],
+    }
+    normalize_stage1_traces(obj)
+    item = obj["gate_trace"][0]
+    assert item["answer"] == "是"
+    assert item["branch"] == "neutral_background"
+
+
+def test_gate_end_removed_and_proceed_answer_fixed() -> None:
+    from pa_agent.ai.trace_normalize import normalize_stage1_traces
+
+    obj = {
+        "gate_result": "proceed",
+        "direction": "bullish",
+        "gate_trace": [
+            {
+                "node_id": "2.5",
+                "question": "惯性强度",
+                "answer": "否",
+                "reason": "惯性不足",
+                "bar_range": "K8-K1",
+            },
+            {
+                "node_id": "gate_end",
+                "question": "闸门是否通过？",
+                "answer": "proceed",
+                "reason": "闸门通过",
+                "bar_range": "K8-K1",
+            },
+        ],
+    }
+    normalize_stage1_traces(obj)
+    assert len(obj["gate_trace"]) == 1
+    assert obj["gate_trace"][0]["node_id"] == "2.5"
+    assert "进入阶段二" in obj["gate_trace"][0]["reason"] or "闸门通过" in obj["gate_trace"][0]["reason"]
+
+
+def test_strip_program_reference_from_gate_13_and_25() -> None:
+    from pa_agent.ai.trace_normalize import normalize_stage1_traces
+
+    long_prog = "程序长块" * 30
+    obj = {
+        "gate_result": "proceed",
+        "gate_trace": [
+            {
+                "node_id": "1.3",
+                "question": "q",
+                "answer": "否",
+                "reason": f"AI简述【程序参考数据（K5-K1）：{long_prog}】",
+                "bar_range": "K5-K1",
+            },
+            {
+                "node_id": "2.5",
+                "question": "q",
+                "answer": "否",
+                "reason": f"AI简述【程序参考数据（K8-K1）：{long_prog}】",
+                "bar_range": "K8-K1",
+            },
+        ],
+    }
+    normalize_stage1_traces(obj)
+    for item in obj["gate_trace"]:
+        assert "程序参考数据" not in item["reason"]
+        assert item["reason"].startswith("AI简述")
+
+
+def test_strip_program_reference_from_gate_25() -> None:
+    from pa_agent.ai.trace_normalize import normalize_stage1_traces
+
+    long_prog = "程序长块" * 30
+    obj = {
+        "gate_result": "proceed",
+        "gate_trace": [
+            {
+                "node_id": "2.5",
+                "question": "q",
+                "answer": "否",
+                "reason": f"AI简述【程序参考数据（K8-K1）：{long_prog}】",
+                "bar_range": "K8-K1",
+            },
+        ],
+    }
+    normalize_stage1_traces(obj)
+    assert "程序参考数据" not in obj["gate_trace"][0]["reason"]
+    assert obj["gate_trace"][0]["reason"].startswith("AI简述")
+
+
 def test_pending_bar_range_inferred_from_reason() -> None:
     """Regression: pending entry bar_range on §9.7 -> K{n} from reason text."""
     item = {
@@ -322,6 +435,16 @@ def test_partial_and_pending_answer_synonyms() -> None:
     }
     normalize_trace_item(item_partial_yes, normalization_mode="lenient")
     assert item_partial_yes["answer"] == "中性"
+
+    item_yes_partial = {
+        "node_id": "6.2",
+        "question": "是否仍在通道内运行？",
+        "answer": "是部分",
+        "reason": "x",
+        "bar_range": "K10-K1",
+    }
+    normalize_trace_item(item_yes_partial, normalization_mode="strict")
+    assert item_yes_partial["answer"] == "中性"
 
     item_channel = {
         "node_id": "4.2",

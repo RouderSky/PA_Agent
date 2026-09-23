@@ -80,9 +80,8 @@ def format_estimated_win_rate_reasoning(decision: dict[str, Any]) -> str:
 
 # Lower cap: reward must be at least equal to risk (1:1) for any stance.
 MIN_RISK_REWARD_RATIO = 1.0
-
-# Upper cap: targets far beyond 1.5R usually imply unrealistically low win rates.
-MAX_RISK_REWARD_RATIO = 1.5
+# Upper cap on TP1 reward:risk — enforced by widening stop, not by shrinking TP1.
+MAX_TP1_RISK_REWARD_RATIO = 1.0
 
 
 def min_risk_reward_ratio(decision_stance: str | None = None) -> float:
@@ -91,9 +90,138 @@ def min_risk_reward_ratio(decision_stance: str | None = None) -> float:
     return MIN_RISK_REWARD_RATIO
 
 
-def max_risk_reward_ratio() -> float:
-    """Maximum reward:risk ratio allowed for any order (win-rate realism cap)."""
-    return MAX_RISK_REWARD_RATIO
+def max_risk_reward_ratio() -> float | None:
+    """Maximum TP1 reward:risk after program stop adjustment."""
+    return MAX_TP1_RISK_REWARD_RATIO
+
+
+def widen_stop_for_tp1_rr_cap(
+    entry: float,
+    take_profit: float,
+    stop_loss: float,
+    direction: object,
+    *,
+    tick: float | None = None,
+) -> float | None:
+    """Move stop outward so TP1 RR <= MAX_TP1_RISK_REWARD_RATIO (entry/TP unchanged).
+
+    Long: lower stop; short: raise stop. Returns None if geometry cannot be fixed.
+    """
+    import math
+
+    rr = compute_risk_reward(entry, take_profit, stop_loss, direction)
+    if rr is None:
+        return None
+    ratio = float(rr["ratio"])
+    if ratio <= MAX_TP1_RISK_REWARD_RATIO + 1e-9:
+        return stop_loss
+
+    reward = float(rr["reward"])
+    min_risk = reward / MAX_TP1_RISK_REWARD_RATIO
+    long = is_long_direction(direction)
+    t = tick if tick and tick > 0 else 0.0
+    min_rr = MIN_RISK_REWARD_RATIO
+
+    def _ratio_for_stop(candidate: float) -> float | None:
+        probe = compute_risk_reward(entry, take_profit, candidate, direction)
+        if probe is None:
+            return None
+        return float(probe["ratio"])
+
+    def _pick_tick_aligned_stop(ideal_stop: float, *, round_down: bool) -> float | None:
+        if not t:
+            return ideal_stop
+        scaled = ideal_stop / t
+        aligned = math.floor(scaled + 1e-12) * t if round_down else math.ceil(scaled - 1e-12) * t
+        return aligned
+
+    if long is True:
+        ideal_stop = entry - min_risk
+        if ideal_stop >= entry:
+            return None
+        candidates: list[float] = [ideal_stop]
+        if t:
+            candidates.extend(
+                s
+                for s in (
+                    _pick_tick_aligned_stop(ideal_stop, round_down=True),
+                    _pick_tick_aligned_stop(ideal_stop, round_down=False),
+                )
+                if s is not None
+            )
+        best: float | None = None
+        best_ratio: float | None = None
+        for candidate in candidates:
+            if candidate >= entry:
+                continue
+            cand_ratio = _ratio_for_stop(candidate)
+            if cand_ratio is None:
+                continue
+            if cand_ratio < min_rr - 1e-9 or cand_ratio > MAX_TP1_RISK_REWARD_RATIO + 1e-9:
+                continue
+            if best_ratio is None or cand_ratio > best_ratio:
+                best = candidate
+                best_ratio = cand_ratio
+        return best
+    if long is False:
+        ideal_stop = entry + min_risk
+        if ideal_stop <= entry:
+            return None
+        candidates = [ideal_stop]
+        if t:
+            candidates.extend(
+                s
+                for s in (
+                    _pick_tick_aligned_stop(ideal_stop, round_down=False),
+                    _pick_tick_aligned_stop(ideal_stop, round_down=True),
+                )
+                if s is not None
+            )
+        best = None
+        best_ratio = None
+        for candidate in candidates:
+            if candidate <= entry:
+                continue
+            cand_ratio = _ratio_for_stop(candidate)
+            if cand_ratio is None:
+                continue
+            if cand_ratio < min_rr - 1e-9 or cand_ratio > MAX_TP1_RISK_REWARD_RATIO + 1e-9:
+                continue
+            if best_ratio is None or cand_ratio > best_ratio:
+                best = candidate
+                best_ratio = cand_ratio
+        return best
+    return None
+
+
+def adjust_decision_stop_for_tp1_rr_cap(
+    decision: dict[str, Any],
+    *,
+    kline_frame: Any = None,
+    tick: float | None = None,
+) -> bool:
+    """Widen stop_loss_price in-place when TP1 RR exceeds the program cap."""
+    if decision.get("order_type") not in ("限价单", "突破单", "市价单"):
+        return False
+    try:
+        entry = float(decision["entry_price"])
+        tp = float(decision["take_profit_price"])
+        sl = float(decision["stop_loss_price"])
+    except (TypeError, ValueError, KeyError):
+        return False
+
+    if tick is None and kline_frame is not None:
+        from pa_agent.util.price_tick import infer_price_tick_from_frame
+
+        tick = infer_price_tick_from_frame(kline_frame)
+
+    new_sl = widen_stop_for_tp1_rr_cap(
+        entry, tp, sl, decision.get("order_direction"), tick=tick
+    )
+    if new_sl is None or abs(new_sl - sl) < 1e-12:
+        return False
+    decision["stop_loss_price"] = new_sl
+    return True
 
 
 def passes_trader_equation(
@@ -134,6 +262,8 @@ def _latest_closed_bar(kline_frame: Any) -> Any | None:
 def validate_limit_order_k1_freshness(
     decision: dict[str, Any],
     kline_frame: Any,
+    *,
+    bar_analysis: dict[str, Any] | None = None,
 ) -> list[str]:
     """Reject stale limit orders that K1 has already traded through."""
     if decision.get("order_type") != "限价单":
@@ -157,43 +287,112 @@ def validate_limit_order_k1_freshness(
     k_close = float(bar.close)
     long = is_long_direction(decision.get("order_direction"))
 
+    pending_planned = False
+    if isinstance(bar_analysis, dict):
+        entry_bar = bar_analysis.get("entry_bar")
+        if isinstance(entry_bar, dict):
+            freshness = str(entry_bar.get("freshness", "") or "").strip().lower()
+            strength = str(entry_bar.get("strength", "") or "").strip().lower()
+            pending_planned = (
+                freshness == "pending"
+                or strength == "not_triggered"
+                or entry_bar.get("bar") is None
+            )
+
     errors: list[str] = []
     if long is True:
-        # Buy limit waits for price to dip to entry (sl < entry < tp).
-        if k_low <= entry + tick:
-            errors.append(
-                f"limit long: K1 low {k_low:.6g} already touched/below entry {entry:.6g}; "
-                "pending buy limit is stale — use 市价单, reprice, or 不下单"
-            )
+        if pending_planned:
+            # Planned buy limit: entry must stay below market close (waiting for dip).
+            if k_close < entry - tick:
+                errors.append(
+                    f"limit long (planned): K1 close {k_close:.6g} is below entry {entry:.6g}; "
+                    "reprice entry or 不下单"
+                )
+        else:
+            if k_low <= entry + tick:
+                errors.append(
+                    f"limit long: K1 low {k_low:.6g} already touched/below entry {entry:.6g}; "
+                    "pending buy limit is stale — use 市价单, reprice, or 不下单"
+                )
+            if k_close < entry - tick:
+                errors.append(
+                    f"limit long: K1 close {k_close:.6g} is below entry {entry:.6g}; "
+                    "do not keep a buy limit above market without repricing"
+                )
         if k_low <= sl + tick:
             errors.append(
                 f"limit long: K1 low {k_low:.6g} already at/below stop {sl:.6g}; "
                 "plan invalid — order_type=不下单"
             )
-        if k_close < entry - tick:
-            errors.append(
-                f"limit long: K1 close {k_close:.6g} is below entry {entry:.6g}; "
-                "do not keep a buy limit above market without repricing"
-            )
     elif long is False:
-        # Sell limit waits for price to rally to entry (tp < entry < sl).
-        if k_high >= entry - tick:
-            errors.append(
-                f"limit short: K1 high {k_high:.6g} already reached/exceeded entry {entry:.6g}; "
-                "pending sell limit is stale — use 市价单, reprice, or 不下单"
-            )
+        if pending_planned:
+            if k_close > entry + tick:
+                errors.append(
+                    f"limit short (planned): K1 close {k_close:.6g} is above entry {entry:.6g}; "
+                    "reprice entry or 不下单"
+                )
+        else:
+            if k_high >= entry - tick:
+                errors.append(
+                    f"limit short: K1 high {k_high:.6g} already reached/exceeded entry {entry:.6g}; "
+                    "pending sell limit is stale — use 市价单, reprice, or 不下单"
+                )
+            if k_close > entry + tick:
+                errors.append(
+                    f"limit short: K1 close {k_close:.6g} is above entry {entry:.6g}; "
+                    "do not keep a sell limit below market without repricing"
+                )
         if k_high >= sl - tick:
             errors.append(
                 f"limit short: K1 high {k_high:.6g} already at/above stop {sl:.6g}; "
                 "plan invalid — order_type=不下单"
             )
-        if k_close > entry + tick:
-            errors.append(
-                f"limit short: K1 close {k_close:.6g} is above entry {entry:.6g}; "
-                "do not keep a sell limit below market without repricing"
-            )
 
     return errors
+
+
+def validate_take_profit_2_geometry(
+    decision: dict[str, Any],
+) -> list[str]:
+    """Ensure TP2 is beyond TP1 in the profit direction (no RR cap on TP2)."""
+    entry = decision.get("entry_price")
+    tp1 = decision.get("take_profit_price")
+    tp2 = decision.get("take_profit_price_2")
+    sl = decision.get("stop_loss_price")
+    direction = decision.get("order_direction")
+
+    try:
+        e = float(entry)
+        t1 = float(tp1)
+        t2 = float(tp2)
+        s = float(sl)
+    except (TypeError, ValueError):
+        return ["decision.take_profit_price_2: required finite number when placing an order"]
+
+    long = is_long_direction(direction)
+    if long is True:
+        if not (s < e < t1 < t2):
+            return [
+                "decision.take_profit_price_2: long plan requires "
+                "stop < entry < take_profit_price < take_profit_price_2"
+            ]
+    elif long is False:
+        if not (t2 < t1 < e < s):
+            return [
+                "decision.take_profit_price_2: short plan requires "
+                "take_profit_price_2 < take_profit_price < entry < stop"
+            ]
+    else:
+        if t1 > e and t2 <= t1:
+            return [
+                "decision.take_profit_price_2: must be above take_profit_price for long geometry"
+            ]
+        if t1 < e and t2 >= t1:
+            return [
+                "decision.take_profit_price_2: must be below take_profit_price for short geometry"
+            ]
+
+    return []
 
 
 def validate_order_trade_metrics(
@@ -201,11 +400,16 @@ def validate_order_trade_metrics(
     *,
     decision_stance: str | None = None,
     kline_frame: Any = None,
+    bar_analysis: dict[str, Any] | None = None,
+    apply_rr_cap_adjustment: bool = True,
 ) -> list[str]:
     """Validate entry/TP/SL geometry, RR floor, and trader equation for live orders."""
     order_type = decision.get("order_type")
     if order_type not in ("限价单", "突破单", "市价单"):
         return []
+
+    if apply_rr_cap_adjustment:
+        adjust_decision_stop_for_tp1_rr_cap(decision, kline_frame=kline_frame)
 
     entry = decision.get("entry_price")
     tp = decision.get("take_profit_price")
@@ -223,7 +427,6 @@ def validate_order_trade_metrics(
     risk = float(rr["risk"])
     reward = float(rr["reward"])
     min_rr = min_risk_reward_ratio(decision_stance)
-    max_rr = max_risk_reward_ratio()
 
     if ratio < min_rr:
         errors.append(
@@ -232,11 +435,12 @@ def validate_order_trade_metrics(
             "order_type=不下单 with 10.3=否"
         )
 
-    if ratio > max_rr:
+    max_rr = max_risk_reward_ratio()
+    if max_rr is not None and ratio > max_rr + 1e-9:
         errors.append(
             f"decision prices: risk_reward {rr['ratio_text']} exceeds maximum "
-            f"{max_rr:.2f}:1; move take_profit closer (higher win-rate target) or set "
-            "order_type=不下单 with 10.3=否"
+            f"{max_rr:.2f}:1 for TP1 after stop adjustment; set order_type=不下单 "
+            "with 10.3=否"
         )
 
     win_rate = _parse_win_rate(decision.get("estimated_win_rate"))
@@ -253,6 +457,12 @@ def validate_order_trade_metrics(
         )
 
     if kline_frame is not None:
-        errors.extend(validate_limit_order_k1_freshness(decision, kline_frame))
+        errors.extend(
+            validate_limit_order_k1_freshness(
+                decision, kline_frame, bar_analysis=bar_analysis
+            )
+        )
+
+    errors.extend(validate_take_profit_2_geometry(decision))
 
     return errors

@@ -37,7 +37,7 @@
 | `provider.api_key` | string | `""` | API Key（明文，内存中临时使用；不持久化到文件） |
 | `provider.api_key_encrypted` | string | `""` | 加密后的 Key；留空表示未配置（通过 GUI 保存时自动加密写入） |
 | `provider.thinking` | bool | `true` | 是否启用思考/推理类扩展参数（依模型与网关而定）。关闭可 3–5 倍提速但分析质量下降 |
-| `provider.reasoning_effort` | string | `"max"` | 推理深度：`low` / `medium` / `high` / `max` |
+| `provider.reasoning_effort` | string | `"high"` | 推理深度：`low` / `medium` / `high` / `max` |
 | `provider.context_window` | int | `2000000` | 用于上下文占用提示的窗口大小（tokens） |
 
 ### general — 通用设置
@@ -59,9 +59,9 @@
 | `general.alert_on_order_opportunity` | bool | `true` | 阶段二给出交易方案时播放警报音、弹窗提示，并自动切换到「决策」页 |
 | `general.decision_flow_auto_play` | bool | `true` | 决策树可视化自动播放 |
 | `general.decision_flow_play_seconds` | int | `50` | 决策树可视化自动播放时长（秒） |
-| `general.decision_flow_default_zoom_pct` | int | `500` | 决策树可视化默认缩放百分比（≥10） |
+| `general.decision_flow_default_zoom_pct` | int | `600` | 决策树可视化默认缩放百分比（≥10） |
 | `general.stream_pane_font_pt` | int | `11` | 「实时」页等宽字体字号（pt，8–28） |
-| `general.chart_seq_label_font_pt` | int | `7` | K 线图上序号标签的字号（pt，6–24） |
+| `general.chart_seq_label_font_pt` | int | `11` | K 线图上序号标签的字号（pt，6–24） |
 
 ### prompt — Prompt 组装调优
 

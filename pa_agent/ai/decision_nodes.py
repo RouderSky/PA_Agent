@@ -32,6 +32,18 @@ logger = logging.getLogger(__name__)
 
 
 
+def _coerce_dict(value: Any) -> dict[str, Any]:
+    """Return *value* when it is a dict; otherwise an empty dict."""
+    return value if isinstance(value, dict) else {}
+
+
+def _coerce_trace_list(trace: Any) -> list[dict[str, Any]]:
+    """Keep only dict trace nodes; tolerate non-list or string elements from AI JSON."""
+    if not isinstance(trace, list):
+        return []
+    return [item for item in trace if isinstance(item, dict)]
+
+
 # ── Threshold constants ────────────────────────────────────────────────────────
 
 
@@ -82,11 +94,11 @@ OVERRIDABLE_NODES: frozenset[str] = frozenset({
 
 })
 
-# Nodes where the AI is the primary judge and the program only provides reference data.
-# When the AI has already written one of these nodes in gate_trace, the program result
-# is appended to the AI node's reason as supplementary data instead of replacing it.
+# Nodes where the AI is the primary judge; program does not replace AI when AI wrote the node.
 # The program node is used as-is only when the AI omitted the node entirely.
 AI_PRIMARY_NODES: frozenset[str] = frozenset({"1.3", "2.5"})
+# AI-primary nodes that receive appended program metrics in reason (currently none).
+AI_PRIMARY_SUPPLEMENT_NODES: frozenset[str] = frozenset()
 
 # §1.3 extreme chaos thresholds
 CHAOS_OVERLAP_THRESHOLD: float = 0.70      # mean overlap_prev_ratio above this → chaotic
@@ -1460,11 +1472,27 @@ def _get_signal_seq(out: dict[str, Any], bars: Any) -> int:
     return 1  # default to K1
 
 
+def has_background_limit_path(out: dict[str, Any]) -> bool:
+    """True when decision_trace records §9.0P=是 (background-driven limit path)."""
+    trace = out.get("decision_trace")
+    if not isinstance(trace, list):
+        return False
+    for item in trace:
+        if not isinstance(item, dict):
+            continue
+        if str(item.get("node_id", "")).strip() != "9.0P":
+            continue
+        return str(item.get("answer", "") or "").strip() == "是"
+    return False
+
+
 def is_planned_limit_order(out: dict[str, Any]) -> bool:
     """True when order is a pending limit plan without requiring a closed signal bar."""
     decision = out.get("decision")
     if not isinstance(decision, dict) or decision.get("order_type") != "限价单":
         return False
+    if has_background_limit_path(out):
+        return True
     bar_analysis = out.get("bar_analysis")
     if not isinstance(bar_analysis, dict):
         return False
@@ -1798,7 +1826,13 @@ def route_order_method(
 
     """Route order method based on cycle_position; return §11 trace nodes."""
 
-    order_type = decision.get("order_type") if decision else None
+    decision = _coerce_dict(decision)
+
+    stage1 = _coerce_dict(stage1_json)
+
+    decision_trace = _coerce_trace_list(decision_trace)
+
+    order_type = decision.get("order_type")
 
 
 
@@ -1875,9 +1909,9 @@ def route_order_method(
 
     cycle = "unknown"
 
-    if stage1_json:
+    if stage1:
 
-        cycle = str(stage1_json.get("cycle_position", "unknown") or "unknown").strip()
+        cycle = str(stage1.get("cycle_position", "unknown") or "unknown").strip()
 
 
 
@@ -1888,7 +1922,12 @@ def route_order_method(
     def _has_trade_prices() -> bool:
         return all(
             decision.get(k) is not None
-            for k in ("entry_price", "stop_loss_price", "take_profit_price")
+            for k in (
+                "entry_price",
+                "stop_loss_price",
+                "take_profit_price",
+                "take_profit_price_2",
+            )
         )
 
     # Preserve model's explicit limit/market choice when §10.3 already passed.
@@ -1937,7 +1976,7 @@ def route_order_method(
     #   3. a valid entry_basis_bar + entry_basis_extreme are present (breakout anchor)
     if cycle == "spike" and candidate == "市价单":
 
-        spike_stage = str((stage1_json or {}).get("spike_stage") or "").strip().lower()
+        spike_stage = str(stage1.get("spike_stage") or "").strip().lower()
 
         if spike_stage in ("ending", "pullback", "channel") and model_order_type == "突破单":
 
@@ -2065,7 +2104,7 @@ def route_order_method(
 
             # For spike_ending exception: the candidate was overridden to 突破单,
             # make the reason explicit so the audit trail is clear.
-            spike_stage_label = str((stage1_json or {}).get("spike_stage") or "").strip().lower()
+            spike_stage_label = str(stage1.get("spike_stage") or "").strip().lower()
             if cycle == "spike" and candidate == "突破单" and spike_stage_label in ("ending", "pullback", "channel"):
                 reason = (
                     f"cycle_position={cycle}（spike_stage={spike_stage_label}，尖峰已结束）"
@@ -2196,18 +2235,14 @@ def merge_program_nodes(
       Program result replaces the AI node entirely.  Used for §1.1, §2.3, §2.4
       where the program has definitive computed data.
 
-    AI-PRIMARY (AI_PRIMARY_NODES — currently §1.3 and §2.5):
-      If the AI already wrote the node, preserve the AI version and append the
-      program's computed metrics to the AI node's reason as a reference block.
-      The program node is used as-is only when the AI omitted the node entirely.
-      This preserves the AI's holistic judgement while surfacing objective signals
-      in the audit trail, preventing silent result-flipping.
+    AI-PRIMARY (AI_PRIMARY_NODES — §1.3 and §2.5):
+      If the AI already wrote the node, preserve the AI version (no program append).
 
     New program nodes not already in the AI trace are inserted in chapter-section
     order (1.1 < 1.2 < 2.3 < 2.5) so the UI renders the correct decision path.
     """
 
-    result = list(trace)
+    result = _coerce_trace_list(trace)
 
     prog_by_id = {n["node_id"]: n for n in program_nodes if isinstance(n, dict) and "node_id" in n}
 
@@ -2229,16 +2264,18 @@ def merge_program_nodes(
 
         if nid in AI_PRIMARY_NODES:
 
-            # AI-primary: keep AI node, append program metrics to reason as reference
-            prog_node = prog_by_id[nid]
-            prog_reason = str(prog_node.get("reason", "") or "").strip()
-            prog_bar_range = str(prog_node.get("bar_range", "") or "").strip()
-            if prog_reason:
-                ai_reason = str(item.get("reason", "") or "").strip()
-                supplement = f"【程序参考数据（{prog_bar_range}）：{prog_reason}】"
-                if supplement not in ai_reason:
-                    result[i] = dict(item)
-                    result[i]["reason"] = f"{ai_reason} {supplement}".strip()
+            if nid in AI_PRIMARY_SUPPLEMENT_NODES:
+                # AI-primary + program supplement in reason (§1.3 only)
+                prog_node = prog_by_id[nid]
+                prog_reason = str(prog_node.get("reason", "") or "").strip()
+                prog_bar_range = str(prog_node.get("bar_range", "") or "").strip()
+                if prog_reason:
+                    ai_reason = str(item.get("reason", "") or "").strip()
+                    supplement = f"【程序参考数据（{prog_bar_range}）：{prog_reason}】"
+                    if supplement not in ai_reason:
+                        result[i] = dict(item)
+                        result[i]["reason"] = f"{ai_reason} {supplement}".strip()
+            # §2.5: keep AI node as-is; program metrics are not appended to reason.
 
         else:
 
@@ -2284,11 +2321,11 @@ def merge_program_nodes_head(
 
     Used when gate_result=wait/unknown so the AI's terminating node stays at the end.
     Applies the same AI-PRIMARY / program-authoritative distinction as merge_program_nodes:
-    §1.3 and §2.5 preserve the AI version and append program data to reason.
+    §1.3 and §2.5 preserve the AI version without appending program data to reason.
     """
 
     # First replace existing entries in-place (same as merge_program_nodes)
-    result = list(trace)
+    result = _coerce_trace_list(trace)
 
     prog_by_id = {n["node_id"]: n for n in program_nodes if isinstance(n, dict) and "node_id" in n}
 
@@ -2308,15 +2345,16 @@ def merge_program_nodes_head(
 
         if nid in AI_PRIMARY_NODES:
 
-            prog_node = prog_by_id[nid]
-            prog_reason = str(prog_node.get("reason", "") or "").strip()
-            prog_bar_range = str(prog_node.get("bar_range", "") or "").strip()
-            if prog_reason:
-                ai_reason = str(item.get("reason", "") or "").strip()
-                supplement = f"【程序参考数据（{prog_bar_range}）：{prog_reason}】"
-                if supplement not in ai_reason:
-                    result[i] = dict(item)
-                    result[i]["reason"] = f"{ai_reason} {supplement}".strip()
+            if nid in AI_PRIMARY_SUPPLEMENT_NODES:
+                prog_node = prog_by_id[nid]
+                prog_reason = str(prog_node.get("reason", "") or "").strip()
+                prog_bar_range = str(prog_node.get("bar_range", "") or "").strip()
+                if prog_reason:
+                    ai_reason = str(item.get("reason", "") or "").strip()
+                    supplement = f"【程序参考数据（{prog_bar_range}）：{prog_reason}】"
+                    if supplement not in ai_reason:
+                        result[i] = dict(item)
+                        result[i]["reason"] = f"{ai_reason} {supplement}".strip()
 
         else:
 
@@ -2642,29 +2680,59 @@ def _sync_order_type_from_11_override(
 
     new_answer = str(override.get("answer", "")).strip()
 
-    if new_answer == "是":
+    if new_answer != "是":
 
-        # Determine which order type this §11 node represents
+        return
 
-        node_id = str(node.get("node_id", ""))
 
-        node_method_map = {
 
-            "11.1": "市价单",
+    node_id = str(node.get("node_id", ""))
 
-            "11.2": "突破单",
+    node_method_map = {
 
-            "11.3": "限价单",
+        "11.1": "市价单",
 
-            "11.4": "限价单",
+        "11.2": "突破单",
 
-        }
+        "11.3": "限价单",
 
-        method = node_method_map.get(node_id)
+        "11.4": "限价单",
 
-        if method and decision.get("order_type") != "不下单":
+    }
 
-            decision["order_type"] = method
+    method = node_method_map.get(node_id)
+
+    if not method or decision.get("order_type") == "不下单":
+
+        return
+
+
+
+    existing = str(decision.get("order_type") or "").strip()
+
+    has_basis = bool(
+
+        decision.get("entry_basis_bar") and decision.get("entry_basis_extreme")
+
+    )
+
+    # Mirror judge_section11 breakout_fallback_to_limit: §11.2 defaults to 突破单,
+
+    # but without basis fields the schema rejects null entry_basis_*. Preserve an
+
+    # explicit 限价单/市价单 plan (e.g. §9.0P planned limit) instead of forcing 突破单.
+
+    if method == "突破单" and not has_basis:
+
+        if existing in ("限价单", "市价单"):
+
+            return
+
+        method = "限价单"
+
+
+
+    decision["order_type"] = method
 
 
 
@@ -2834,9 +2902,12 @@ class DecisionNodeEngine:
 
         out.setdefault("decision_trace", [])
 
+        out["decision_trace"] = _coerce_trace_list(out.get("decision_trace"))
 
-
-        decision = out.get("decision") or {}
+        raw_decision = out.get("decision")
+        decision = _coerce_dict(raw_decision)
+        if raw_decision is not None and not isinstance(raw_decision, dict):
+            out["decision"] = decision
 
         order_direction = str(decision.get("order_direction", "") or "").strip() or None
 
@@ -2872,7 +2943,7 @@ class DecisionNodeEngine:
         # "等待" = AI semantically means "no valid signal bar" (should be "否" but
         #          AI sometimes conflates "does it exist?" with "should I wait?").
         # Both map to skip §9.1-9.5 — unless this is a planned limit order.
-        _dt = out.get("decision_trace") or []
+        _dt = out["decision_trace"]
         _node_90 = next(
             (x for x in _dt if isinstance(x, dict) and str(x.get("node_id", "")) == "9.0"),
             None,
@@ -2883,6 +2954,8 @@ class DecisionNodeEngine:
             _ans_90 = str(_node_90.get("answer", "") or "").strip()
             if _ans_90 in ("否", "等待") and not _planned_limit:
                 _section9_has_signal = False
+            elif _ans_90 in ("否", "等待") and has_background_limit_path(out):
+                _section9_has_signal = True
 
 
 
@@ -2908,7 +2981,7 @@ class DecisionNodeEngine:
 
         current_order_type = decision.get("order_type")
 
-        decision_trace = out.get("decision_trace", [])
+        decision_trace = out["decision_trace"]
 
         sec11_fills: list[NodeFill] = []
 
@@ -2950,10 +3023,10 @@ class DecisionNodeEngine:
             _no_signal_bar = (
                 not isinstance(_signal_bar, dict) or not _signal_bar.get("bar")
             )
-            if _no_signal_bar:
+            if _no_signal_bar or has_background_limit_path(out):
                 _skip_reason = (
-                    "计划型限价单，尚无已收盘信号棒，"
-                    "§9.1-9.3不适用（§9.0 已接受计划型入场）。"
+                    "计划型限价单（§9.0P 或 §9.0 背景路径），尚无已收盘信号棒，"
+                    "§9.1-9.3不适用。"
                 )
                 for _node in (node_91, node_92, node_93):
                     _node["skipped"] = True
@@ -2992,7 +3065,7 @@ class DecisionNodeEngine:
 
         out["decision_trace"] = merge_program_nodes(
 
-            out.get("decision_trace", []), final_nodes
+            out["decision_trace"], final_nodes
 
         )
 

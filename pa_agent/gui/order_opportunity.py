@@ -6,6 +6,8 @@ import os
 import sys
 from typing import Any
 
+from PyQt6.QtCore import Qt
+
 logger = logging.getLogger(__name__)
 
 ORDER_OPPORTUNITY_TYPES: frozenset[str] = frozenset({"限价单", "突破单", "市价单"})
@@ -60,13 +62,15 @@ def format_order_alert_message(decision: dict[str, Any]) -> str:
     entry = _fmt_price(decision.get("entry_price"))
     stop = _fmt_price(decision.get("stop_loss_price"))
     target = _fmt_price(decision.get("take_profit_price"))
+    target2 = _fmt_price(decision.get("take_profit_price_2"))
     reasoning = str(decision.get("reasoning") or "").strip()
     lines = [
         f"方向：{direction}",
         f"方式：{order_type}",
         f"入场：{entry}",
         f"止损：{stop}",
-        f"止盈：{target}",
+        f"TP1：{target}",
+        f"TP2：{target2}",
     ]
     if reasoning:
         preview = reasoning if len(reasoning) <= 200 else reasoning[:200] + "…"
@@ -92,7 +96,7 @@ ORDER_ALERT_AUTO_CLOSE_MS = 120_000
 
 
 def show_order_opportunity_alert(parent: Any, decision: dict[str, Any]) -> None:
-    """Modal alert that auto-closes after :data:`ORDER_ALERT_AUTO_CLOSE_MS`."""
+    """Non-modal alert that auto-closes after :data:`ORDER_ALERT_AUTO_CLOSE_MS`."""
     from PyQt6.QtCore import QTimer
     from PyQt6.QtWidgets import QMessageBox
 
@@ -105,7 +109,9 @@ def show_order_opportunity_alert(parent: Any, decision: dict[str, Any]) -> None:
     timer.setSingleShot(True)
     timer.timeout.connect(box.accept)
     timer.start(ORDER_ALERT_AUTO_CLOSE_MS)
-    box.exec()
+    # Non-modal: avoid blocking the main event loop after analysis completes.
+    box.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+    box.show()
 
 
 def play_order_alert_sound() -> bool:
@@ -117,15 +123,20 @@ def play_order_alert_sound() -> bool:
             if not os.path.isfile(path):
                 continue
             try:
-                # Blocking playback: MessageBeep often returns instantly with no audible output.
-                winsound.PlaySound(path, winsound.SND_FILENAME)
+                winsound.PlaySound(
+                    path,
+                    winsound.SND_FILENAME | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+                )
                 return True
             except Exception as exc:
                 logger.debug("order alert PlaySound file %s failed: %s", path, exc)
 
         for alias in ("SystemExclamation", "SystemHand", "SystemAsterisk"):
             try:
-                winsound.PlaySound(alias, winsound.SND_ALIAS | winsound.SND_NODEFAULT)
+                winsound.PlaySound(
+                    alias,
+                    winsound.SND_ALIAS | winsound.SND_ASYNC | winsound.SND_NODEFAULT,
+                )
                 return True
             except Exception as exc:
                 logger.debug("order alert PlaySound alias %s failed: %s", alias, exc)

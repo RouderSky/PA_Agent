@@ -48,6 +48,19 @@ def should_use_qclaw_provider(
     base_url: str | None = None,
 ) -> bool:
     """True when settings Save should auto-configure from local QClaw."""
+    from pa_agent.ai.cursor_connector import is_openclaw_cs_model
+    from pa_agent.ai.qoder_connector import is_openclaw_qc_model
+    from pa_agent.ai.trae_connector import is_openclaw_twc_model
+    from pa_agent.ai.workbuddy_connector import is_openclaw_wb_model
+
+    # Other openclaw routes take precedence over QClaw.
+    if (
+        is_openclaw_wb_model(model)
+        or is_openclaw_cs_model(model)
+        or is_openclaw_twc_model(model)
+        or is_openclaw_qc_model(model)
+    ):
+        return False
     if is_openclaw_model(model):
         return True
     if not detect_qclaw():
@@ -86,10 +99,18 @@ def sync_qclaw_agent_provider_on_load(
     save_path: Path | None = None,
 ) -> None:
     """Refresh token/base_url for openclaw Agent routing (no relay on 19004)."""
+    from pa_agent.ai.workbuddy_connector import is_openclaw_wb_model
+
     if not detect_qclaw():
         return
     provider = settings.provider
     model = str(getattr(provider, "model", "") or "").strip().lower()
+    if is_openclaw_wb_model(model):
+        return
+    from pa_agent.ai.cursor_connector import is_openclaw_cs_model
+
+    if is_openclaw_cs_model(model):
+        return
     if not is_openclaw_model(model) and not _uses_qclaw_gateway(provider):
         return
 
@@ -251,11 +272,8 @@ def apply_qclaw_provider_to_settings(
             "3. gateway.auth.token 已配置"
         )
 
-    model_arg = (
-        (preferred_model or "").strip()
-        if is_openclaw_model(preferred_model)
-        else _PUBLIC_GATEWAY_MODEL
-    )
+    model_hint = (preferred_model or getattr(settings.provider, "model", "") or "").strip()
+    model_arg = model_hint if is_openclaw_model(model_hint) else _PUBLIC_GATEWAY_MODEL
     resolved = qclaw_provider_settings(model=model_arg, prefer_relay=False)
     if resolved is None:
         return "QClaw 配置读取失败。"
@@ -264,11 +282,10 @@ def apply_qclaw_provider_to_settings(
     provider.model = resolved.model
     provider.base_url = resolved.base_url
     provider.api_key = resolved.api_key
-    provider.thinking = resolved.thinking
-    provider.reasoning_effort = resolved.reasoning_effort
     provider.context_window = resolved.context_window
+    # Preserve user/GUI thinking prefs — only connector fields (url/key/model) are authoritative.
 
-    ok, health_msg = qclaw_health_check(prefer_relay=False)
+    ok, health_msg = qclaw_health_check_base(provider.base_url, provider.api_key)
     if not ok:
         return f"QClaw 连通性检查失败：\n\n{health_msg}"
     return None
@@ -277,7 +294,7 @@ def apply_qclaw_provider_to_settings(
 def qclaw_provider_settings(
     model: str | None = None,
     thinking: bool = True,
-    reasoning_effort: str = "max",
+    reasoning_effort: str = "high",
     context_window: int = 2_000_000,
     *,
     prefer_relay: bool = False,
@@ -322,7 +339,18 @@ def qclaw_health_check(*, prefer_relay: bool = False) -> tuple[bool, str]:
         token,
         prefer_relay=prefer_relay,
     )
+    ok, msg = qclaw_health_check_base(base_url, token)
+    if not ok:
+        return False, msg
+    return True, f"QClaw 连接正常（{mode}，推荐模型 {model}），{msg}"
 
+
+def qclaw_health_check_base(base_url: str, token: str) -> tuple[bool, str]:
+    """Health check for a specific QClaw base_url/token pair.
+
+    This avoids re-scanning QClaw config multiple times in one Save cycle
+    (which may pick different configs and lead to mismatched ports).
+    """
     try:
         import httpx
 
@@ -348,9 +376,6 @@ def qclaw_health_check(*, prefer_relay: bool = False) -> tuple[bool, str]:
                 f"可用模型: {', '.join(model_ids) if model_ids else '(列表为空)'}"
             )
 
-        return (
-            True,
-            f"QClaw 连接正常（{mode}，推荐模型 {model}），{detail}",
-        )
+        return True, detail
     except Exception as exc:
         return False, f"无法连接 QClaw ({base_url}): {exc}"

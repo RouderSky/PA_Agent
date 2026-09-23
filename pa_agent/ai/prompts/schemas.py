@@ -87,7 +87,7 @@ _SIGNAL_BAR: dict = {
 
 _ENTRY_BAR: dict = {
     "type": "object",
-    "required": ["bar", "strength", "follow_through"],
+    "required": ["strength", "follow_through"],
     "properties": {
         "bar": {"type": ["string", "null"]},
         "strength": {"type": "string", "enum": ["strong", "weak", "not_triggered"]},
@@ -148,8 +148,6 @@ _BAR_BY_BAR_ITEM: dict = {
             "enum": [
                 "structure", "signal", "entry", "confirmation",
                 "noise", "trap", "climax", "test",
-                "trend_bull", "trend_bear",
-                "trapped_traders",
             ],
         },
         "bar_type": {
@@ -208,7 +206,13 @@ STAGE1_SCHEMA: dict = {
             "type": ["string", "null"],
             "enum": ["active", "ending", "transitioning", None],
         },
+        "climax_risk": {
+            "type": ["string", "null"],
+            "enum": ["none", "warning", "triggered", None],
+        },
         "market_phase": {"type": "string", "enum": ["stable", "transitioning"]},
+        "support_levels": {"type": "array", "items": {"type": "string"}},
+        "resistance_levels": {"type": "array", "items": {"type": "string"}},
         "transition_risk": {
             "type": ["string", "null"],
             "enum": ["high", "medium", "low", None],
@@ -342,8 +346,9 @@ _DECISION_BASE: dict = {
         "entry_basis_extreme": {"type": ["string", "null"], "enum": ["high", "low", None]},
         "entry_rule": {"type": ["string", "null"]},
         "take_profit_price": {"type": ["number", "null"]},
+        "take_profit_price_2": {"type": ["number", "null"]},
         "stop_loss_price": {"type": ["number", "null"]},
-        "reasoning": {"type": "string"},
+        "reasoning": {"type": "string", "minLength": 1, "maxLength": 280},
         "diagnosis_confidence": {"type": "integer", "minimum": 0, "maximum": 100},
         "diagnosis_confidence_reasoning": {"type": "string"},
         "trade_confidence": {"type": "integer", "minimum": 0, "maximum": 100},
@@ -369,6 +374,7 @@ _DECISION_BASE: dict = {
                     "entry_basis_extreme": {"type": "null"},
                     "entry_rule": {"type": "null"},
                     "take_profit_price": {"type": "null"},
+                    "take_profit_price_2": {"type": "null"},
                     "stop_loss_price": {"type": "null"},
                     "order_direction": {"type": "null"},
                     "estimated_win_rate": {"type": "null"},
@@ -387,6 +393,7 @@ _DECISION_BASE: dict = {
                 "properties": {
                     "entry_price": {"type": "number"},
                     "take_profit_price": {"type": "number"},
+                    "take_profit_price_2": {"type": "number"},
                     "stop_loss_price": {"type": "number"},
                     "order_direction": {"type": "string", "enum": ["做多", "做空"]},
                     "estimated_win_rate": {"type": "integer", "minimum": 0, "maximum": 100},
@@ -394,6 +401,7 @@ _DECISION_BASE: dict = {
                 "required": [
                     "entry_price",
                     "take_profit_price",
+                    "take_profit_price_2",
                     "stop_loss_price",
                     "order_direction",
                     "estimated_win_rate",

@@ -14,6 +14,9 @@ from pa_agent.util.price_tick import (
 
 logger = logging.getLogger(__name__)
 
+# Max length for decision.reasoning (stage-2 trade rationale paragraph).
+DECISION_REASONING_MAX_LEN = 280
+
 # ── Model alias mappings (Stage 1 normalizer has the same; keep in sync) ──
 
 _SIGNAL_BAR_QUALITY_ALIASES: dict[str, str] = {
@@ -101,14 +104,64 @@ _SIGNAL_BAR_QUALITY_ENUM = frozenset({"strong", "medium", "weak", "invalid"})
 
 
 _TRADE_ORDER_TYPES = frozenset({"限价单", "突破单", "市价单"})
+
+_ORDER_TYPE_ALIASES: dict[str, str] = {
+    "no_order": "不下单",
+    "notrade": "不下单",
+    "no_trade": "不下单",
+    "hold": "不下单",
+    "skip": "不下单",
+    "none": "不下单",
+    "wait": "不下单",
+    "limit": "限价单",
+    "limit_order": "限价单",
+    "breakout": "突破单",
+    "breakout_order": "突破单",
+    "market": "市价单",
+    "market_order": "市价单",
+}
 _NO_ORDER_PRICE_FIELDS = (
     "order_direction",
     "entry_price",
     "take_profit_price",
+    "take_profit_price_2",
     "stop_loss_price",
     "entry_basis_bar",
     "entry_basis_extreme",
     "entry_rule",
+)
+
+_DECISION_SUBFIELD_KEYS: frozenset[str] = frozenset({
+    "order_direction",
+    "order_type",
+    "entry_price",
+    "entry_basis_bar",
+    "entry_basis_extreme",
+    "entry_rule",
+    "take_profit_price",
+    "take_profit_price_2",
+    "stop_loss_price",
+    "reasoning",
+    "diagnosis_confidence",
+    "diagnosis_confidence_reasoning",
+    "trade_confidence",
+    "trade_confidence_reasoning",
+    "estimated_win_rate",
+    "estimated_win_rate_reasoning",
+    "key_factors",
+    "watch_points",
+    "risk_assessment",
+    "invalidation_condition",
+})
+
+# Decision fields models sometimes nest under diagnosis_summary by mistake.
+_DECISION_FIELDS_FROM_DIAG_SUMMARY: tuple[str, ...] = (
+    "estimated_win_rate_reasoning",
+    "estimated_win_rate",
+    "trade_confidence_reasoning",
+    "diagnosis_confidence_reasoning",
+    "diagnosis_confidence",
+    "trade_confidence",
 )
 
 # Valid enum values for features_used in next_bar_prediction / next_cycle_prediction.
@@ -177,6 +230,20 @@ def _normalize_entry_bar_freshness(entry_bar: dict[str, Any]) -> bool:
     return False
 
 
+def _normalize_order_type_aliases(decision: dict[str, Any]) -> bool:
+    """Map English order_type slips (no_order, limit, …) to schema enums."""
+    raw = str(decision.get("order_type", "") or "").strip()
+    if not raw:
+        return False
+    key = raw.lower().replace(" ", "_").replace("-", "_")
+    mapped = _ORDER_TYPE_ALIASES.get(key) or _ORDER_TYPE_ALIASES.get(raw.lower())
+    if mapped and mapped != raw:
+        decision["order_type"] = mapped
+        logger.debug("order_type %r -> %r", raw, mapped)
+        return True
+    return False
+
+
 def _normalize_stage2_bar_analysis_enums(
     out: dict[str, Any],
     *,
@@ -219,6 +286,13 @@ def _normalize_stage2_bar_analysis_enums(
         )
         if norm_q and norm_q != raw_q:
             signal_bar["quality"] = norm_q
+            changed = True
+        raw_pat = str(signal_bar.get("pattern", "") or "").strip().lower()
+        if raw_pat in ("no_signal", "no-signal", "nosignal", "not_triggered"):
+            signal_bar["pattern"] = "none"
+            changed = True
+        if not str(signal_bar.get("reason") or "").strip():
+            signal_bar["reason"] = "无独立信号棒（quality=invalid 或计划型观望）"
             changed = True
 
     second_entry = bar_analysis.get("second_entry")
@@ -352,6 +426,226 @@ def _normalize_stage2_enum_aliases(out: dict[str, Any]) -> bool:
     return changed
 
 
+def _order_type_from_decision_scalar(value: str) -> str | None:
+    """Map a scalar decision token (wait/reject/limit/…) to order_type."""
+    token = str(value or "").strip().lower()
+    if not token:
+        return None
+    if token in _ORDER_TYPE_ALIASES:
+        return _ORDER_TYPE_ALIASES[token]
+    normalized = token.replace(" ", "_").replace("-", "_")
+    if normalized in _ORDER_TYPE_ALIASES:
+        return _ORDER_TYPE_ALIASES[normalized]
+    outcome = _TERMINAL_OUTCOME_ALIASES.get(token) or _TERMINAL_OUTCOME_ALIASES.get(
+        normalized
+    )
+    if outcome in ("wait", "reject"):
+        return "不下单"
+    return None
+
+
+def _repair_diagnosis_summary_and_decision(
+    out: dict[str, Any],
+    *,
+    stage1_json: dict[str, Any] | None = None,
+) -> bool:
+    """Hoist misplaced decision fields and ensure diagnosis_summary schema fields."""
+    changed = False
+    decision = out.get("decision")
+    if not isinstance(decision, dict):
+        return False
+    s1 = stage1_json or {}
+    dsum = out.get("diagnosis_summary")
+    if isinstance(dsum, dict):
+        for key in _DECISION_FIELDS_FROM_DIAG_SUMMARY:
+            if key not in dsum:
+                continue
+            val = dsum.get(key)
+            existing = decision.get(key)
+            if existing not in (None, "", []) and key in decision:
+                dsum.pop(key, None)
+                changed = True
+                continue
+            if val in (None, "", []):
+                dsum.pop(key, None)
+                continue
+            decision[key] = val
+            dsum.pop(key, None)
+            logger.debug("Hoisted diagnosis_summary.%s -> decision.%s", key, key)
+            changed = True
+
+        if not str(dsum.get("cycle_position") or "").strip():
+            dsum["cycle_position"] = str(s1.get("cycle_position") or "unknown")
+            changed = True
+        if not str(dsum.get("direction") or "").strip():
+            dsum["direction"] = str(s1.get("direction") or "neutral")
+            changed = True
+        if not isinstance(dsum.get("key_signals"), list):
+            key_signals = dsum.get("key_signals")
+            if not isinstance(key_signals, list):
+                key_signals = list(s1.get("key_signals") or [])
+            dsum["key_signals"] = key_signals
+            changed = True
+    return changed
+
+
+def _unwrap_flat_stage2_decision(out: dict[str, Any]) -> bool:
+    """Repair models that put decision fields at root or use decision=wait string."""
+    changed = False
+    hoisted: dict[str, Any] = {}
+    for key in _DECISION_SUBFIELD_KEYS:
+        if key in out:
+            hoisted[key] = out.pop(key)
+            changed = True
+
+    raw = out.get("decision")
+    if isinstance(raw, str):
+        order_type = _order_type_from_decision_scalar(raw) or "不下单"
+        decision: dict[str, Any] = {"order_type": order_type}
+        decision.update(hoisted)
+        out["decision"] = decision
+        logger.debug(
+            "Unwrapped scalar decision %r -> order_type=%s with %d hoisted fields",
+            raw,
+            order_type,
+            len(hoisted),
+        )
+        return True
+
+    if isinstance(raw, dict):
+        for key, val in hoisted.items():
+            existing = raw.get(key)
+            if key not in raw or existing is None or existing == "" or existing == []:
+                raw[key] = val
+                changed = True
+        return changed
+
+    if hoisted:
+        out["decision"] = hoisted
+        logger.debug("Built decision object from %d hoisted root fields", len(hoisted))
+        return True
+    return changed
+
+
+def _hoist_terminal_from_decision(out: dict[str, Any]) -> bool:
+    """Move terminal nested under decision to the top level."""
+    if isinstance(out.get("terminal"), dict):
+        return False
+    decision = out.get("decision")
+    if not isinstance(decision, dict):
+        return False
+    nested = decision.pop("terminal", None)
+    if not isinstance(nested, dict):
+        return False
+    out["terminal"] = nested
+    logger.debug("Hoisted terminal from decision to top level")
+    return True
+
+
+def _ensure_decision_required_fields(
+    out: dict[str, Any],
+    *,
+    stage1_json: dict[str, Any] | None = None,
+) -> bool:
+    """Fill missing decision sub-fields that commonly trigger schema retries."""
+    decision = out.get("decision")
+    if not isinstance(decision, dict):
+        return False
+    s1 = stage1_json or {}
+    changed = _normalize_order_type_aliases(decision)
+    if not isinstance(decision.get("key_factors"), list):
+        decision["key_factors"] = []
+        changed = True
+    if not isinstance(decision.get("watch_points"), list):
+        decision["watch_points"] = []
+        changed = True
+    text_defaults = {
+        "reasoning": "基于阶段一诊断与当前K线结构的阶段二决策说明",
+        "diagnosis_confidence_reasoning": (
+            str(s1.get("htf_context") or "").strip()[:500]
+            or "依据阶段一诊断与闸门结论"
+        ),
+        "risk_assessment": "见 watch_points 与 invalidation_condition",
+    }
+    for key, default in text_defaults.items():
+        if not isinstance(decision.get(key), str) or not str(decision.get(key)).strip():
+            decision[key] = default
+            changed = True
+    if decision.get("diagnosis_confidence") is None:
+        try:
+            decision["diagnosis_confidence"] = int(s1.get("diagnosis_confidence") or 50)
+        except (TypeError, ValueError):
+            decision["diagnosis_confidence"] = 50
+        changed = True
+    if decision.get("trade_confidence") is None:
+        decision["trade_confidence"] = (
+            0 if decision.get("order_type") == "不下单" else 50
+        )
+        changed = True
+    if (
+        not isinstance(decision.get("trade_confidence_reasoning"), str)
+        or not decision["trade_confidence_reasoning"].strip()
+    ):
+        decision["trade_confidence_reasoning"] = (
+            "无入场计划，不存在交易信心"
+            if decision.get("order_type") == "不下单"
+            else "基于结构与入场方案的综合评估"
+        )
+        changed = True
+    if decision.get("order_type") == "不下单":
+        if "estimated_win_rate" not in decision:
+            decision["estimated_win_rate"] = None
+            changed = True
+    elif decision.get("estimated_win_rate") is None:
+        decision["estimated_win_rate"] = 50
+        changed = True
+    if decision.get("estimated_win_rate_reasoning") is not None and not isinstance(
+        decision.get("estimated_win_rate_reasoning"), str
+    ):
+        decision["estimated_win_rate_reasoning"] = None
+        changed = True
+    elif "estimated_win_rate_reasoning" not in decision:
+        decision["estimated_win_rate_reasoning"] = (
+            None
+            if decision.get("order_type") == "不下单"
+            else "基于入场/止损/目标三价与结构背景的胜率估算"
+        )
+        changed = True
+    elif (
+        decision.get("order_type") != "不下单"
+        and isinstance(decision.get("estimated_win_rate_reasoning"), str)
+        and not str(decision.get("estimated_win_rate_reasoning")).strip()
+    ):
+        decision["estimated_win_rate_reasoning"] = "基于入场/止损/目标三价与结构背景的胜率估算"
+        changed = True
+    terminal = out.get("terminal")
+    if isinstance(terminal, dict) and not str(terminal.get("label") or "").strip():
+        outcome = str(terminal.get("outcome") or "wait")
+        terminal["label"] = {
+            "trade": "执行下单方案",
+            "reject": "交易者方程未通过",
+            "wait": "等待更好 setup",
+            "proceed": "继续评估",
+        }.get(outcome, "阶段二终局")
+        changed = True
+    return changed
+
+
+def _truncate_decision_reasoning(decision: dict[str, Any]) -> bool:
+    """Cap decision.reasoning length to avoid verbose JSON and schema failures."""
+    reasoning = decision.get("reasoning")
+    if not isinstance(reasoning, str):
+        return False
+    text = reasoning.strip()
+    if len(text) <= DECISION_REASONING_MAX_LEN:
+        if text != reasoning:
+            decision["reasoning"] = text
+            return True
+        return False
+    decision["reasoning"] = text[: DECISION_REASONING_MAX_LEN - 1] + "…"
+    return True
+
+
 def _trace_node_answer(trace: Any, node_id: str) -> str | None:
     if not isinstance(trace, list):
         return None
@@ -406,6 +700,7 @@ def _clear_decision_to_no_order(decision: dict[str, Any]) -> None:
     for field in _NO_ORDER_PRICE_FIELDS:
         decision[field] = None
     decision["estimated_win_rate"] = None
+    decision["estimated_win_rate_reasoning"] = None
     # trade_confidence / trade_confidence_reasoning: schema requires non-null values.
     # When the breaker forces 不下单, provide valid defaults.
     if decision.get("trade_confidence") is None:
@@ -440,16 +735,24 @@ def _coerce_decision_no_order(out: dict[str, Any]) -> bool:
     decision = out.get("decision")
     if not isinstance(decision, dict):
         return False
-    if decision.get("order_type") not in _TRADE_ORDER_TYPES:
-        return False
+    _normalize_order_type_aliases(decision)
 
-    trace = out.get("decision_trace")
     terminal = out.get("terminal")
     outcome = (
         str(terminal.get("outcome", "")).strip()
         if isinstance(terminal, dict)
         else ""
     )
+    order_type = decision.get("order_type")
+
+    if order_type not in _TRADE_ORDER_TYPES:
+        if outcome in ("wait", "reject") and order_type != "不下单":
+            _clear_decision_to_no_order(decision)
+            logger.debug("Coerced %r + terminal=%s to 不下单", order_type, outcome)
+            return True
+        return False
+
+    trace = out.get("decision_trace")
 
     triggers: list[str] = []
     if _trace_node_answer(trace, "10.3") == "否":
@@ -464,6 +767,25 @@ def _coerce_decision_no_order(out: dict[str, Any]) -> bool:
 
     _clear_decision_to_no_order(decision)
     logger.debug("Coerced decision to 不下单 (%s)", ", ".join(triggers))
+    return True
+
+
+def _coerce_breakout_without_basis(out: dict[str, Any]) -> bool:
+    """Breakout orders require entry_basis_*; fall back to limit when missing."""
+    decision = out.get("decision")
+    if not isinstance(decision, dict):
+        return False
+    if decision.get("order_type") != "突破单":
+        return False
+    if decision.get("entry_basis_bar") and decision.get("entry_basis_extreme"):
+        return False
+    decision["order_type"] = "限价单"
+    decision["entry_basis_bar"] = None
+    decision["entry_basis_extreme"] = None
+    decision["entry_rule"] = None
+    logger.debug(
+        "breakout order missing entry_basis_*; coerced to 限价单"
+    )
     return True
 
 
@@ -595,6 +917,9 @@ def _coerce_decision_when_trade_metrics_fail(
         decision,
         decision_stance=decision_stance,
         kline_frame=kline_frame,
+        bar_analysis=out.get("bar_analysis")
+        if isinstance(out.get("bar_analysis"), dict)
+        else None,
     )
     if not metric_errors:
         return False
@@ -619,12 +944,37 @@ def _coerce_decision_when_trade_metrics_fail(
     return True
 
 
-def _normalize_next_cycle_prediction(prediction: dict[str, Any]) -> None:
+def _normalize_next_cycle_prediction(
+    prediction: dict[str, Any],
+    *,
+    stage1_json: dict[str, Any] | None = None,
+) -> None:
     """In-place normalize next_cycle_prediction common model quirks. Idempotent."""
     from pa_agent.ai.cycle_enums import CYCLE_ORDER
 
     if not isinstance(prediction, dict):
         return
+
+    for alt_key in ("predicted_next_cycle", "next_cycle"):
+        alt_val = prediction.get(alt_key)
+        if alt_val and not prediction.get("cycle"):
+            prediction["cycle"] = str(alt_val).strip().lower()
+    for stray in (
+        "current_cycle",
+        "predicted_next_cycle",
+        "next_cycle",
+        "confidence",
+    ):
+        prediction.pop(stray, None)
+
+    # 0. Migrate primary/secondary shorthand → cycle + probabilities
+    primary = prediction.pop("primary", None)
+    prediction.pop("primary_probability", None)
+    prediction.pop("secondary", None)
+    prediction.pop("secondary_probability", None)
+    if primary and not prediction.get("cycle"):
+        prediction["cycle"] = str(primary).strip().lower()
+    prediction.setdefault("unpredictable", False)
 
     # 1. unpredictable fallback
     unpredictable = bool(prediction.get("unpredictable", False))
@@ -669,6 +1019,18 @@ def _normalize_next_cycle_prediction(prediction: dict[str, Any]) -> None:
 
     # 4. probabilities integer rounding, clamping, and sum normalization
     probs = prediction.get("probabilities")
+    if not unpredictable and not isinstance(probs, dict):
+        cycle_guess = str(
+            prediction.get("cycle")
+            or (stage1_json or {}).get("cycle_position")
+            or "trading_range"
+        ).strip().lower()
+        prediction["probabilities"] = _default_cycle_probs(cycle_guess)
+        probs = prediction["probabilities"]
+        logger.debug(
+            "Synthesized next_cycle_prediction.probabilities from cycle=%r",
+            cycle_guess,
+        )
     if isinstance(probs, dict):
         normalized: dict[str, int] = {}
         for key in CYCLE_ORDER:
@@ -696,6 +1058,10 @@ def _normalize_next_cycle_prediction(prediction: dict[str, Any]) -> None:
             )
 
         prediction["probabilities"] = normalized
+
+        if not prediction.get("cycle"):
+            max_value = max(normalized[k] for k in CYCLE_ORDER)
+            prediction["cycle"] = next(k for k in CYCLE_ORDER if normalized[k] == max_value)
 
         # 5. cycle = argmax, tie-break by CYCLE_ORDER literal order
         max_value = max(normalized[k] for k in CYCLE_ORDER)
@@ -1084,6 +1450,59 @@ def _max_bar_seq_from_frame(kline_frame: Any) -> int | None:
     return max(seqs) if seqs else None
 
 
+def _fix_background_limit_trace(out: dict[str, Any]) -> bool:
+    """Ensure §9.0P=是 when a planned limit order follows §9.0=否."""
+    try:
+        from pa_agent.ai.decision_nodes import is_planned_limit_order
+    except ImportError:
+        return False
+    if not is_planned_limit_order(out):
+        return False
+    trace = out.get("decision_trace")
+    if not isinstance(trace, list):
+        return False
+
+    node_90: dict[str, Any] | None = None
+    node_90p: dict[str, Any] | None = None
+    for item in trace:
+        if not isinstance(item, dict):
+            continue
+        nid = str(item.get("node_id", "")).strip()
+        if nid == "9.0":
+            node_90 = item
+        elif nid == "9.0P":
+            node_90p = item
+
+    changed = False
+    if node_90 is not None:
+        ans = str(node_90.get("answer", "") or "").strip()
+        if ans in ("否", "等待"):
+            if node_90p is None:
+                trace.insert(
+                    trace.index(node_90) + 1,
+                    {
+                        "node_id": "9.0P",
+                        "section": "入场信号",
+                        "question": "背景驱动限价单评估（§9.0=否 时必须评估）",
+                        "answer": "是",
+                        "reason": (
+                            "程序校正：计划型限价单，周期/结构位支持挂限价，"
+                            "继续 §10 定三价。"
+                        ),
+                        "skipped": False,
+                        "bar_range": "K10-K1",
+                    },
+                )
+                changed = True
+            elif str(node_90p.get("answer", "") or "").strip() in ("否", "等待"):
+                node_90p["answer"] = "是"
+                base = str(node_90p.get("reason", "") or "").strip()
+                suffix = "（程序校正：背景限价路径，非信号棒路径。）"
+                node_90p["reason"] = f"{base}{suffix}".strip() if base else suffix.strip()
+                changed = True
+    return changed
+
+
 def _fix_9_0_for_planned_limit(out: dict[str, Any]) -> bool:
     """When model outputs a valid planned limit but §9.0=否, upgrade to 是."""
     try:
@@ -1124,10 +1543,22 @@ def normalize_stage2(
     decision_stance: str | None = None,
     stage1_json: dict[str, Any] | None = None,
     skip_next_bar: bool = False,
+    previous_record: Any | None = None,
+    structure_flip_cooldown_bars: int = 3,
 ) -> dict[str, Any]:
     """Return a copy of *obj* with decision_trace quirks corrected."""
     out = copy.deepcopy(obj)
     frame_max = _max_bar_seq_from_frame(kline_frame)
+    _unwrap_flat_stage2_decision(out)
+    _hoist_terminal_from_decision(out)
+    _repair_diagnosis_summary_and_decision(out, stage1_json=stage1_json)
+    decision = out.get("decision")
+    if isinstance(decision, dict):
+        _normalize_order_type_aliases(decision)
+    _ensure_decision_required_fields(out, stage1_json=stage1_json)
+    decision = out.get("decision")
+    if isinstance(decision, dict):
+        _truncate_decision_reasoning(decision)
     _normalize_stage2_enum_aliases(out)
     _normalize_stage2_bar_analysis_enums(out, stage1_json=stage1_json)
     _coerce_decision_no_order(out)
@@ -1146,11 +1577,18 @@ def normalize_stage2(
             "breakout entry_price adjusted to basis extreme ± 1 tick (basis=%s)",
             decision.get("entry_basis_bar"),
         )
+    if isinstance(decision, dict):
+        from pa_agent.util.trade_metrics import adjust_decision_stop_for_tp1_rr_cap
+
+        if adjust_decision_stop_for_tp1_rr_cap(decision, kline_frame=kline_frame):
+            logger.debug("stop_loss widened to bring TP1 RR within program cap")
     _coerce_decision_when_trade_metrics_fail(
         out,
         decision_stance=decision_stance,
         kline_frame=kline_frame,
     )
+    if _fix_background_limit_trace(out):
+        logger.debug("Ensured §9.0P for background planned limit order")
     if _fix_9_0_for_planned_limit(out):
         logger.debug("Upgraded §9.0 to 是 for planned limit order")
 
@@ -1161,6 +1599,8 @@ def normalize_stage2(
             DecisionNodeEngine.apply_stage2(out, kline_frame, stage1_json)
         except Exception as exc:  # noqa: BLE001
             logger.warning("DecisionNodeEngine.apply_stage2 failed: %s", exc)
+    if _coerce_breakout_without_basis(out):
+        logger.debug("Coerced breakout-without-basis to 限价单 after DecisionNodeEngine")
 
     normalize_stage2_traces(
         out,
@@ -1293,6 +1733,31 @@ def normalize_stage2(
 
     pred_c = out.get("next_cycle_prediction")
     if isinstance(pred_c, dict):
-        _normalize_next_cycle_prediction(pred_c)
+        _normalize_next_cycle_prediction(pred_c, stage1_json=stage1_json)
+
+    # next_cycle_prediction is diagnostic sidebar only — do NOT hard-block orders.
+    # Empirics: directional edge from cycle forecasts is thin (~1–2pt); hard bans
+    # remain Always-In / direction / climax rules elsewhere.
+
+    if kline_frame is not None and stage1_json:
+        try:
+            from pa_agent.ai.decision_continuity import (
+                apply_continuity_guard,
+                build_continuity_context,
+            )
+
+            ctx = build_continuity_context(
+                frame=kline_frame,
+                stage1_json=stage1_json,
+                previous_record=previous_record,
+                cooldown_bars=structure_flip_cooldown_bars,
+            )
+            out = apply_continuity_guard(out, ctx)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("apply_continuity_guard failed: %s", exc)
+
+    decision = out.get("decision")
+    if isinstance(decision, dict):
+        _truncate_decision_reasoning(decision)
 
     return out

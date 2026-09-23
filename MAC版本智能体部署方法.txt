@@ -95,7 +95,7 @@
 - macOS 下 pip 会自动跳过 pyproject.toml 中标记 sys_platform == 'win32' 的包：
   MetaTrader5、pywin32（这两个包不支持 macOS，不需要安装）
 - 实际安装的依赖：PyQt6, pyqtgraph, numpy, pandas, openai, tiktoken,
-  jsonschema, pydantic, tvDatafeed, cryptography
+  jsonschema, pydantic, tvDatafeed, cryptography, akshare, baostock, curl_cffi
 
   注意：tvDatafeed 是 TradingView 数据源的核心依赖，
   从 GitHub 安装（git+https），网络环境需能访问 GitHub。
@@ -112,6 +112,9 @@
   python3 -c "import pydantic; print('pydantic OK')"
   python3 -c "import cryptography; print('cryptography OK')"
   python3 -c "from tvDatafeed import TvDatafeed; print('tvDatafeed OK')"
+  python3 -c "import akshare; print('akshare OK')"
+  python3 -c "import baostock; print('baostock OK')"
+  python3 -c "import curl_cffi; print('curl_cffi OK')"
 
 预期输出：每行均显示 "xxx OK"
 
@@ -372,7 +375,7 @@ EOF
 6.4 最终验收清单
 
   [ ] python3 --version 输出 3.11+
-  [ ] 所有核心包导入测试通过（10 个 OK，不含 MetaTrader5 和 pywin32）
+  [ ] 所有核心包导入测试通过（13 个 OK，不含 MetaTrader5 和 pywin32）
   [ ] TradingView 连通性测试通过：
       python3 -c "from tvDatafeed import TvDatafeed, Interval; df = TvDatafeed().get_hist('XAUUSD', 'OANDA', Interval.in_daily, n_bars=2); print('TV OK:', len(df), 'bars')"
       预期输出：TV OK: 2 bars（若失败，见第三步故障排查 问题 3.5 / 3.6）

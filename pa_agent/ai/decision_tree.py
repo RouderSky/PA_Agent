@@ -403,6 +403,7 @@ def build_stage2_gate_wait_response(stage1_json: dict[str, Any]) -> dict[str, An
             "order_type": "不下单",
             "entry_price": None,
             "take_profit_price": None,
+            "take_profit_price_2": None,
             "stop_loss_price": None,
             "reasoning": (
                 f"阶段一闸门结论为「{stage1_json.get('gate_result', 'wait')}」，"
@@ -619,11 +620,19 @@ def validate_stage2_trace_consistency(stage2: dict[str, Any]) -> list[str]:
         # stop reason than §9.0=否 and takes semantic precedence.
         idx_90 = _index_of(node_ids, "9.0")
         idx_101 = _index_of(node_ids, "10.1")
+        idx_90p = _index_of(node_ids, "9.0P")
         no_entry_plan = False
         if idx_90 >= 0:
             ans_90 = str(trace[idx_90].get("answer", "") or "").strip()
             if ans_90 in ("否", "等待"):
-                no_entry_plan = True
+                if idx_90p >= 0:
+                    ans_90p = str(trace[idx_90p].get("answer", "") or "").strip()
+                    if ans_90p == "是":
+                        no_entry_plan = False
+                    else:
+                        no_entry_plan = True
+                else:
+                    no_entry_plan = True
         if not no_entry_plan and idx_101 >= 0:
             ans_101 = str(trace[idx_101].get("answer", "") or "").strip()
             if ans_101 == "否":

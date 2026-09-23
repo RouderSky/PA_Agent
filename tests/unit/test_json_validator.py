@@ -10,6 +10,7 @@ from pa_agent.ai.json_validator import (
     JsonValidator,
     Ok,
     ValidationError,
+    _repair_unclosed_string_before_brace,
     _repair_unescaped_quotes,
     _strip_fences,
 )
@@ -35,6 +36,13 @@ def test_strip_fences_includes_repair():
     raw = _SAMPLE.read_text(encoding="utf-8")
     obj = json.loads(_strip_fences(raw))
     assert isinstance(obj["decision_trace"], list)
+
+
+def test_repair_unclosed_string_before_brace_fixes_summary_newline() -> None:
+    broken = '{"summary":"unfinished\n}'
+    repaired = _repair_unclosed_string_before_brace(broken)
+    obj = json.loads(repaired)
+    assert obj["summary"] == "unfinished"
 
 
 # ── T2: Schema backward-compatibility tests ──────────────────────────────────

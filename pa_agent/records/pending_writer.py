@@ -78,13 +78,21 @@ class PendingWriter:
         data = record.model_dump()
         data = self._sanitize(data, self._api_key)
         self._write_json(path, data)
+        try:
+            from pa_agent.records.analysis_history import invalidate_latest_record_cache
+
+            invalidate_latest_record_cache()
+        except Exception:  # noqa: BLE001
+            pass
         return path
 
     def save_partial(self, record: AnalysisRecord, reason: str) -> Path:
         """Serialize and save a partial analysis record with a reason field.
 
         The ``_partial_reason`` key is injected into the serialized dict
-        (it is not part of the Pydantic model).
+        (it is not part of the Pydantic model). When ``record.exception`` is
+        set, ``partial_reason`` is also copied into that dict for easier
+        filtering without reading ``_partial_reason``.
 
         Returns the path written to, or a best-effort path on failure.
         """
@@ -92,8 +100,16 @@ class PendingWriter:
         path = self._pending_dir / f"{basename}.json"
         data = record.model_dump()
         data["_partial_reason"] = reason
+        if isinstance(data.get("exception"), dict):
+            data["exception"] = {**data["exception"], "partial_reason": reason}
         data = self._sanitize(data, self._api_key)
         self._write_json(path, data)
+        try:
+            from pa_agent.records.analysis_history import invalidate_latest_record_cache
+
+            invalidate_latest_record_cache()
+        except Exception:  # noqa: BLE001
+            pass
         return path
 
     def append_followup(self, record_id: str, turn: FollowupTurn) -> None:

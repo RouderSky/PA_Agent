@@ -55,7 +55,6 @@ class TestNoLinesWhenNotTrading:
 
     def test_lines_cleared_when_switching_to_no_order(self, chart_widget):
         """Lines drawn for a trading decision must be cleared when '不下单' is set."""
-        # First set a trading decision (should draw 3 lines)
         trading_decision = {
             "order_type": "限价单",
             "order_direction": "做多",
@@ -85,6 +84,19 @@ class TestNoLinesWhenNotTrading:
             "Expected no InfiniteLine items after switching to '不下单', "
             f"but found {_count_infinite_lines(chart_widget)}."
         )
+
+    def test_continuity_overlay_keeps_lines_on_wait_no_order(self, chart_widget):
+        """不下单 + chart_overlay_active should still draw prior entry/TP/SL."""
+        chart_widget.set_decision({
+            "order_type": "不下单",
+            "order_direction": "做多",
+            "entry_price": 2640.0,
+            "take_profit_price": 2660.0,
+            "stop_loss_price": 2630.0,
+            "chart_overlay_active": True,
+            "reasoning": "延续等待上一轮限价方案。",
+        })
+        assert _count_infinite_lines(chart_widget) == 3
 
     def test_short_decision_shows_down_arrow(self, chart_widget, qtbot):
         """做空 decision draws a ▼ marker at the newest bar."""

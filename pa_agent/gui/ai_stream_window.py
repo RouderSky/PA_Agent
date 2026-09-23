@@ -11,7 +11,6 @@ from PyQt6.QtWidgets import (
     QHBoxLayout,
     QLabel,
     QLineEdit,
-    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -75,7 +74,6 @@ class AIStreamPanel(QWidget):
         self._cancel_token: Optional["CancelToken"] = None
         self._worker: Optional[_ChatWorker] = None
         self._sending = False
-        self._red_warned = False
         self._settings: Optional["Settings"] = None
 
         self._stage: str = ""
@@ -446,7 +444,6 @@ class AIStreamPanel(QWidget):
         self._progress_bar.setFormat("0%")
         self._progress_bar.setStyleSheet(_STYLE_NORMAL)
         self._token_label.setText("—")
-        self._red_warned = False
 
     def clear_stream_output(self) -> None:
         """Clear only the visible live output pane and local text counters."""
@@ -498,13 +495,6 @@ class AIStreamPanel(QWidget):
         self._progress_bar.setFormat(f"{pct:.1f}%")
         if pct >= _RED_PCT:
             self._progress_bar.setStyleSheet(_STYLE_RED)
-            if not self._red_warned:
-                self._red_warned = True
-                QMessageBox.warning(
-                    self,
-                    "上下文用量警告",
-                    f"上下文用量已达 {pct:.1f}%，接近上限。",
-                )
         elif pct >= _YELLOW_PCT:
             self._progress_bar.setStyleSheet(_STYLE_YELLOW)
         else:

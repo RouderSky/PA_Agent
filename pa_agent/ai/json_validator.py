@@ -141,6 +141,55 @@ def _strip_fences(text: str) -> str:
     return _repair_unescaped_quotes(_repair_semicolon_separator(_extract_outer_json_object(t)))
 
 
+def _escape_control_chars_in_json_strings(text: str) -> str:
+    """Escape raw newlines/tabs/control chars inside JSON string literals."""
+    out: list[str] = []
+    in_string = False
+    escape = False
+    for ch in text:
+        if not in_string:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+            continue
+        if escape:
+            escape = False
+            out.append(ch)
+            continue
+        if ch == "\\":
+            escape = True
+            out.append(ch)
+            continue
+        if ch == '"':
+            in_string = False
+            out.append(ch)
+            continue
+        if ch == "\n":
+            out.append("\\n")
+        elif ch == "\r":
+            out.append("\\r")
+        elif ch == "\t":
+            out.append("\\t")
+        elif ch < " ":
+            continue
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def coalesce_model_json_text(content: str, reasoning: str | None = None) -> str:
+    """Prefer content JSON; fall back to reasoning when content is empty or prose."""
+    stripped = _strip_fences(content or "")
+    if stripped.startswith("{") or stripped.startswith("["):
+        return content or ""
+    if reasoning:
+        from_reasoning = _strip_fences(reasoning)
+        if from_reasoning.startswith("{") or from_reasoning.startswith("["):
+            logger.info("Extracting JSON from reasoning_content (content was not JSON)")
+            return from_reasoning
+    return content or ""
+
+
 def format_model_json_for_context(raw_text: str) -> str | None:
     """Extract JSON from model output and return pretty-printed text for prompts."""
     stripped = _strip_fences(raw_text or "")
@@ -300,27 +349,82 @@ def _inject_stage1_missing_tail(text: str) -> str:
     return _balance_json_brackets(tail)
 
 
+def _repair_unclosed_string_before_brace(text: str) -> str:
+    """Close strings broken by a raw newline followed by ``}`` / ``]``.
+
+    Models sometimes omit the closing quote in long ``summary`` / ``reasoning``
+    fields, e.g. ``"summary": "text\\n}\\n  },"`` → insert ``"`` before ``}``.
+    """
+    out: list[str] = []
+    in_string = False
+    escape = False
+    i = 0
+    n = len(text)
+
+    while i < n:
+        ch = text[i]
+        if not in_string:
+            if ch == '"':
+                in_string = True
+            out.append(ch)
+            i += 1
+            continue
+        if escape:
+            escape = False
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\\":
+            escape = True
+            out.append(ch)
+            i += 1
+            continue
+        if ch == '"':
+            in_string = False
+            out.append(ch)
+            i += 1
+            continue
+        if ch == "\n":
+            j = i + 1
+            while j < n and text[j] in " \t\r":
+                j += 1
+            if j < n and text[j] in "}]":
+                out.append('"')
+                in_string = False
+                continue
+        out.append(ch)
+        i += 1
+    return "".join(out)
+
+
 def _try_repair_json_syntax(
     text: str,
     stage: Literal["stage1", "stage2"],
     *,
     allow_tail_inject: bool = False,
 ) -> str | None:
-    """Return repaired JSON text when truncation caused a syntax error, else None."""
+    """Return repaired JSON text when truncation/syntax slip caused parse failure."""
     if not text.strip().startswith("{"):
         return None
 
-    candidate = text.rstrip()
+    bases: list[str] = [text.rstrip()]
     if stage == "stage1" and allow_tail_inject:
-        candidate = _inject_stage1_missing_tail(candidate)
-    candidate = _balance_json_brackets(candidate)
-    if candidate == text.rstrip():
-        return None
-    try:
-        json.loads(candidate)
-    except json.JSONDecodeError:
-        return None
-    return candidate
+        bases.append(_inject_stage1_missing_tail(bases[0]))
+
+    seen: set[str] = set()
+    for base in bases:
+        for variant in (base, _repair_unclosed_string_before_brace(base)):
+            candidate = _balance_json_brackets(variant.rstrip())
+            if candidate in seen:
+                continue
+            seen.add(candidate)
+            try:
+                json.loads(candidate)
+            except json.JSONDecodeError:
+                continue
+            if candidate != text.rstrip():
+                return candidate
+    return None
 
 
 # ── JsonValidator ─────────────────────────────────────────────────────────────
@@ -355,6 +459,8 @@ class JsonValidator:
         incremental_new_bar_count: int = 0,
         incremental_previous_stage1: dict[str, Any] | None = None,
         skip_next_bar: bool = False,
+        previous_record: Any | None = None,
+        structure_flip_cooldown_bars: int = 3,
     ) -> dict[str, Any]:
         """Apply the same post-parse normalization as :meth:`validate`."""
         norm_mode = getattr(self._validation, "normalization_mode", "strict")
@@ -381,6 +487,8 @@ class JsonValidator:
             decision_stance=decision_stance,
             stage1_json=stage1_json,
             skip_next_bar=False,
+            previous_record=previous_record,
+            structure_flip_cooldown_bars=structure_flip_cooldown_bars,
         )
 
     def validate(
@@ -394,6 +502,8 @@ class JsonValidator:
         incremental_new_bar_count: int = 0,
         incremental_previous_stage1: dict[str, Any] | None = None,
         skip_next_bar: bool = False,
+        previous_record: Any | None = None,
+        structure_flip_cooldown_bars: int = 3,
     ) -> Result:
         """Validate *raw_text* against the schema for *stage*.
 
@@ -425,39 +535,50 @@ class JsonValidator:
             )
 
         # ── Category a: syntax error ──────────────────────────────────────────
+        obj: dict | list | None = None
+        parse_exc: json.JSONDecodeError | None = None
         try:
             obj = json.loads(stripped)
         except json.JSONDecodeError as exc:
-            # Stage 2: fail fast on syntax errors (no silent truncation repair).
-            allow_inject = (
-                stage == "stage1"
-                and not getattr(self._validation, "disable_truncation_repair", True)
-            )
-            repaired = (
-                _try_repair_json_syntax(stripped, stage, allow_tail_inject=allow_inject)
-                if stage == "stage1"
-                else None
-            )
-            if repaired is not None:
+            parse_exc = exc
+            escaped = _escape_control_chars_in_json_strings(stripped)
+            if escaped != stripped:
                 try:
-                    obj = json.loads(repaired)
-                    logger.warning(
-                        "Repaired truncated %s JSON (%d -> %d chars)",
-                        stage,
-                        len(stripped),
-                        len(repaired),
-                    )
-                except json.JSONDecodeError:
-                    repaired = None
-            if repaired is None:
-                pos = f"{exc.lineno}:{exc.colno}"
-                return ValidationError(
-                    category="a",
-                    stage=stage,
-                    raw_text=raw_text,
-                    parse_position=pos,
-                    message=f"JSON syntax error at {pos}: {exc.msg}",
+                    obj = json.loads(escaped)
+                    logger.debug("Parsed JSON after escaping control chars in strings")
+                    stripped = escaped
+                    parse_exc = None
+                except json.JSONDecodeError as exc2:
+                    parse_exc = exc2
+            if obj is None and parse_exc is not None:
+                exc = parse_exc
+                allow_inject = (
+                    stage == "stage1"
+                    and not getattr(self._validation, "disable_truncation_repair", True)
                 )
+                repaired = _try_repair_json_syntax(
+                    stripped, stage, allow_tail_inject=allow_inject
+                )
+                if repaired is not None:
+                    try:
+                        obj = json.loads(repaired)
+                        logger.warning(
+                            "Repaired truncated %s JSON (%d -> %d chars)",
+                            stage,
+                            len(stripped),
+                            len(repaired),
+                        )
+                    except json.JSONDecodeError:
+                        repaired = None
+                if repaired is None:
+                    pos = f"{exc.lineno}:{exc.colno}"
+                    return ValidationError(
+                        category="a",
+                        stage=stage,
+                        raw_text=raw_text,
+                        parse_position=pos,
+                        message=f"JSON syntax error at {pos}: {exc.msg}",
+                    )
 
         if not isinstance(obj, dict):
             return ValidationError(
@@ -476,6 +597,8 @@ class JsonValidator:
             incremental_new_bar_count=incremental_new_bar_count,
             incremental_previous_stage1=incremental_previous_stage1,
             skip_next_bar=False if stage == "stage2" else skip_next_bar,
+            previous_record=previous_record,
+            structure_flip_cooldown_bars=structure_flip_cooldown_bars,
         )
         norm_mode = getattr(self._validation, "normalization_mode", "strict")
 
@@ -646,7 +769,13 @@ class JsonValidator:
             return None
 
         order_type = decision.get("order_type")
-        price_fields = ["entry_price", "take_profit_price", "stop_loss_price", "order_direction"]
+        price_fields = [
+            "entry_price",
+            "take_profit_price",
+            "take_profit_price_2",
+            "stop_loss_price",
+            "order_direction",
+        ]
 
         if order_type == "不下单":
             violated = [f for f in price_fields if decision.get(f) is not None]
@@ -663,6 +792,7 @@ class JsonValidator:
                     "allowed": {
                         "entry_price": ["<finite number>"],
                         "take_profit_price": ["<finite number>"],
+                        "take_profit_price_2": ["<finite number>"],
                         "stop_loss_price": ["<finite number>"],
                         "order_direction": ["做多", "做空"],
                     },
@@ -722,6 +852,9 @@ class JsonValidator:
             decision,
             decision_stance=decision_stance,
             kline_frame=kline_frame,
+            bar_analysis=obj.get("bar_analysis")
+            if isinstance(obj.get("bar_analysis"), dict)
+            else None,
         )
 
     @staticmethod
@@ -926,27 +1059,36 @@ class JsonValidator:
             and pattern in ("", "none", "not_triggered", "pending")
             and signal_bar.get("bar") is None
         )
+        _planned_limit_boundary_patterns = (
+            "tr_boundary",
+            "breakout_pullback",
+            "h1",
+            "h2",
+            "l1",
+            "l2",
+            "wedge",
+            "mtr",
+        )
         planned_limit_weak = (
             pending_entry
             and order_type == "限价单"
             and quality == "weak"
             and (
                 signal_bar.get("bar") is None
-                or pattern in (
-                    "",
-                    "none",
-                    "tr_boundary",
-                    "breakout_pullback",
-                    "h1",
-                    "h2",
-                    "l1",
-                    "l2",
-                    "wedge",
-                    "mtr",
-                )
+                or pattern in ("", "none", *_planned_limit_boundary_patterns)
             )
         )
-        planned_entry = planned_without_signal or planned_limit_weak
+        # §9.0P planned limit: invalid + boundary pattern + no closed signal bar.
+        planned_limit_invalid_boundary = (
+            pending_entry
+            and order_type == "限价单"
+            and quality == "invalid"
+            and pattern in _planned_limit_boundary_patterns
+            and signal_bar.get("bar") is None
+        )
+        planned_entry = (
+            planned_without_signal or planned_limit_weak or planned_limit_invalid_boundary
+        )
         if sig_seq is None and not planned_entry:
             errors.append("bar_analysis.signal_bar.bar must be a K{n} reference")
         if entry_seq is None and not pending_entry:
