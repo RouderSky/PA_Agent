@@ -10,6 +10,9 @@ from pa_agent.util.price_tick import infer_price_tick_from_frame
 
 logger = logging.getLogger(__name__)
 
+# Swing pivots for S/R refill: only scan recent bars (K1..K40), not full history.
+_SWING_LOOKBACK_BARS = 40
+
 _NUMBER = re.compile(r"\d+(?:\.\d+)?")
 
 
@@ -103,6 +106,12 @@ def _is_swing_high(bars: tuple[Any, ...], idx: int) -> bool:
     return True
 
 
+def _recent_bars(bars: tuple[Any, ...], *, lookback: int = _SWING_LOOKBACK_BARS) -> tuple[Any, ...]:
+    if lookback <= 0 or len(bars) <= lookback:
+        return bars
+    return tuple(bars[:lookback])
+
+
 def _swing_support_prices(
     bars: tuple[Any, ...],
     close: float,
@@ -110,15 +119,16 @@ def _swing_support_prices(
     max_levels: int = 3,
 ) -> list[float]:
     """Swing lows below *close*, nearest-first (highest low under price)."""
+    window = _recent_bars(bars)
     candidates: list[float] = []
-    for idx in range(len(bars)):
-        low = float(bars[idx].low)
+    for idx in range(len(window)):
+        low = float(window[idx].low)
         if low >= close:
             continue
-        if _is_swing_low(bars, idx):
+        if _is_swing_low(window, idx):
             candidates.append(low)
     if not candidates:
-        for bar in bars:
+        for bar in window:
             low = float(bar.low)
             if low < close:
                 candidates.append(low)
@@ -133,15 +143,16 @@ def _swing_resistance_prices(
     max_levels: int = 3,
 ) -> list[float]:
     """Swing highs above *close*, nearest-first (lowest high above price)."""
+    window = _recent_bars(bars)
     candidates: list[float] = []
-    for idx in range(len(bars)):
-        high = float(bars[idx].high)
+    for idx in range(len(window)):
+        high = float(window[idx].high)
         if high <= close:
             continue
-        if _is_swing_high(bars, idx):
+        if _is_swing_high(window, idx):
             candidates.append(high)
     if not candidates:
-        for bar in bars:
+        for bar in window:
             high = float(bar.high)
             if high > close:
                 candidates.append(high)
@@ -155,9 +166,12 @@ def _merge_level_texts(
     *,
     tick: float | None,
     max_levels: int,
+    kind: str,
 ) -> list[str]:
-    out: list[str] = []
+    """Merge AI levels with swing pivots and sort near → far (prompt contract)."""
+    entries: list[tuple[float, str]] = []
     seen: set[float] = set()
+
     for raw in kept:
         bounds = _parse_level_bounds(raw)
         if bounds is None:
@@ -166,18 +180,56 @@ def _merge_level_texts(
         if key in seen:
             continue
         seen.add(key)
-        out.append(str(raw))
-        if len(out) >= max_levels:
-            return out
+        entries.append((key, str(raw)))
+
     for price in swing_prices:
         key = round(price, 8)
         if key in seen:
             continue
         seen.add(key)
-        out.append(_price_text(price, tick))
-        if len(out) >= max_levels:
-            break
-    return out
+        entries.append((key, _price_text(price, tick)))
+
+    if kind == "support":
+        entries.sort(key=lambda item: item[0], reverse=True)
+    elif kind == "resistance":
+        entries.sort(key=lambda item: item[0])
+    else:
+        raise ValueError(f"unknown kind: {kind!r}")
+
+    return _trim_levels_preserve_extremes(entries, max_levels)
+
+
+def _trim_levels_preserve_extremes(
+    entries: list[tuple[float, str]],
+    max_levels: int,
+) -> list[str]:
+    """Keep nearest + farthest after sort; fill interior slots from the far side."""
+    if max_levels <= 0 or not entries:
+        return []
+    if len(entries) <= max_levels:
+        return [text for _, text in entries]
+
+    nearest = entries[0]
+    farthest = entries[-1]
+    interior_slots = max_levels - 2
+    if interior_slots <= 0:
+        return [nearest[1], farthest[1]][:max_levels]
+
+    interior = entries[1:-1]
+    picked: list[tuple[float, str]] = [nearest]
+    if interior_slots > 0 and interior:
+        # Prefer interior levels closer to the far end (structural S/R over micro swings).
+        step = max(1, len(interior) // interior_slots)
+        for slot in range(interior_slots):
+            idx = min(len(interior) - 1, len(interior) - 1 - slot * step)
+            candidate = interior[idx]
+            if candidate not in picked:
+                picked.append(candidate)
+            if len(picked) >= max_levels - 1:
+                break
+    if farthest not in picked:
+        picked.append(farthest)
+    return [text for _, text in picked[:max_levels]]
 
 
 def refresh_stage1_support_resistance(
@@ -216,8 +268,12 @@ def refresh_stage1_support_resistance(
     swing_sup = _swing_support_prices(tuple(bars), close, max_levels=max_levels)
     swing_res = _swing_resistance_prices(tuple(bars), close, max_levels=max_levels)
 
-    new_sup = _merge_level_texts(kept_sup, swing_sup, tick=tick, max_levels=max_levels)
-    new_res = _merge_level_texts(kept_res, swing_res, tick=tick, max_levels=max_levels)
+    new_sup = _merge_level_texts(
+        kept_sup, swing_sup, tick=tick, max_levels=max_levels, kind="support"
+    )
+    new_res = _merge_level_texts(
+        kept_res, swing_res, tick=tick, max_levels=max_levels, kind="resistance"
+    )
 
     changed = new_sup != old_sup or new_res != old_res
     if changed:

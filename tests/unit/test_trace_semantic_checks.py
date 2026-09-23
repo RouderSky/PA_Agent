@@ -10,7 +10,36 @@ from pa_agent.ai.trace_semantic_checks import (
 )
 
 
-def test_empty_reason_fails() -> None:
+def test_empty_reason_ok_for_intermediate_node() -> None:
+    trace = [
+        {
+            "node_id": "1.2",
+            "question": "是否能识别市场周期？",
+            "answer": "是",
+            "reason": "",
+            "bar_range": "K8-K1",
+        }
+    ]
+    errs = validate_trace_semantics(trace, path_prefix="gate_trace", stage="stage1")
+    assert not any("non-empty" in e for e in errs)
+
+
+def test_empty_reason_fails_for_10_3() -> None:
+    trace = [
+        {
+            "node_id": "10.3",
+            "question": "交易者方程是否成立？",
+            "answer": "是",
+            "reason": "   ",
+            "bar_range": "K1",
+        }
+    ]
+    errs = validate_trace_semantics(trace, path_prefix="decision_trace", stage="stage2")
+    assert any("non-empty" in e for e in errs)
+
+
+def test_empty_reason_fails_legacy_0_1() -> None:
+    """0.1 is optional-reason; empty is allowed (legacy test name kept for grep stability)."""
     trace = [
         {
             "node_id": "0.1",
@@ -21,7 +50,7 @@ def test_empty_reason_fails() -> None:
         }
     ]
     errs = validate_trace_semantics(trace, path_prefix="gate_trace", stage="stage1")
-    assert any("non-empty" in e for e in errs)
+    assert not any("non-empty" in e for e in errs)
 
 
 def test_short_reason_ok_if_substantive() -> None:

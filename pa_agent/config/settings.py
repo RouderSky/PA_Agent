@@ -5,7 +5,7 @@ from typing import Literal
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 DecisionStance = Literal["conservative", "balanced", "aggressive", "extreme_aggressive"]
-DataSourceKind = Literal["mt5", "tradingview", "akshare", "eastmoney"]
+DataSourceKind = Literal["mt5", "tradingview", "akshare", "eastmoney", "eastmoney_futures", "tushare"]
 NormalizationMode = Literal["strict", "lenient"]
 
 
@@ -18,7 +18,7 @@ class AIProviderSettings(BaseModel):
     api_key: str = ""
     api_key_encrypted: str = ""
     thinking: bool = True
-    reasoning_effort: Literal["low", "medium", "high", "max"] = "max"
+    reasoning_effort: Literal["low", "medium", "high", "max"] = "high"
     context_window: int = 2_000_000
 
 
@@ -28,7 +28,7 @@ class PromptSettings(BaseModel):
 
     #: When True, Stage 2 loads every strategy .txt (legacy/test behaviour).
     stage2_load_full_strategy_library: bool = False
-    experience_max_entries: int = Field(default=3, ge=0, le=10)
+    experience_max_entries: int = Field(default=0, ge=0, le=10)
     experience_max_chars_per_entry: int = Field(default=400, ge=100, le=4000)
     #: Inject pattern判定表 + 速查 brief into Stage 1 user prompt (reduces missed tags).
     stage1_inject_pattern_briefs: bool = True
@@ -61,7 +61,7 @@ class GeneralSettings(BaseModel):
 
     analysis_bar_count: int = Field(default=100, ge=2, le=5000)
     refresh_interval_ms: int = 1000
-    context_warning_threshold_pct: float = 80.0
+    context_warning_threshold_pct: float = 99_999_999.0
     last_data_source: DataSourceKind = "mt5"
     #: A-share K-line adjust for East Money / Baostock (qfq=前复权)
     kline_adjust: Literal["qfq", "hfq", "none"] = "qfq"
@@ -77,11 +77,11 @@ class GeneralSettings(BaseModel):
     #: 阶段二交易倾向：balanced=默认；conservative/aggressive 逐级调整下单意愿
     decision_stance: DecisionStance = "balanced"
     #: 决策树可视化：在「整图适配」基础上的缩放百分比（100=与适配一致；可任意放大，仅下限 10%）
-    decision_flow_default_zoom_pct: int = Field(default=500, ge=10)
+    decision_flow_default_zoom_pct: int = Field(default=600, ge=10)
     #: 「实时」页思考过程/撰写回答框与追问输入框的等宽字体字号（pt）
     stream_pane_font_pt: int = Field(default=11, ge=8, le=28)
     #: K 线图上 #序号 标签的字号（pt）
-    chart_seq_label_font_pt: int = Field(default=7, ge=6, le=24)
+    chart_seq_label_font_pt: int = Field(default=11, ge=6, le=24)
     #: 两阶段分析结束后是否自动恢复 K 线图表实时刷新
     auto_resume_chart_after_analysis: bool = False
     #: 持续跟踪分析：有新K线收盘时自动触发新一轮分析
@@ -89,19 +89,23 @@ class GeneralSettings(BaseModel):
     #: 重试后取消持续跟踪分析：校验失败触发重试后自动关闭 keep_analysis
     cancel_keep_analysis_on_retry: bool = False
     #: 交易决策置信度门槛：仅当 trade_confidence >= 此值时，才视为有下单机会（弹窗警报并提供决策详情）
-    decision_confidence_threshold: int = Field(default=60, ge=0, le=100)
+    decision_confidence_threshold: int = Field(default=40, ge=0, le=100)
     #: 开启下根K线预期功能；关闭时不向模型请求该预测，节省 token
     enable_next_bar_prediction: bool = False
+    #: 同一结构位 entry 相差≤3跳时，禁止反向新方案的冷却 K 线根数（已收盘）
+    structure_flip_cooldown_bars: int = Field(default=3, ge=1, le=50)
 
     @field_validator("last_data_source", mode="before")
     @classmethod
     def _coerce_legacy_data_source(cls, v: object) -> object:
         if v == "yfinance":
-            return "mt5"
+            return "eastmoney"
         if v in ("adata", "a_share"):
             return "akshare"
         if v == "eastmoney":
             return "eastmoney"
+        if v == "tushare":
+            return "tushare"
         return v
 
     @field_validator("decision_flow_default_zoom_pct", mode="before")
@@ -112,6 +116,44 @@ class GeneralSettings(BaseModel):
         return v
 
 
+_FEISHU_CONFIG_KEYS = (
+    "enabled",
+    "webhook_url",
+    "secret",
+    "app_id",
+    "app_secret",
+    "notify_on_order_only",
+)
+
+
+class FeishuSettings(BaseModel):
+    """Feishu bot notification settings (persisted in settings.json)."""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = True
+    webhook_url: str = ""
+    secret: str = ""
+    app_id: str = ""
+    app_secret: str = ""
+    #: True = only push when there is an order opportunity.
+    notify_on_order_only: bool = True
+
+
+class TushareSettings(BaseModel):
+    """Tushare Pro data source settings (persisted in ignored settings.json)."""
+    model_config = ConfigDict(extra="ignore")
+
+    token: str = ""
+
+
+class PushPlusSettings(BaseModel):
+    """PushPlus notification settings (settings.json only; no GUI)."""
+    model_config = ConfigDict(extra="ignore")
+
+    enabled: bool = False
+    token: str = ""
+
+
 class Settings(BaseModel):
     """Root settings object persisted to config/settings.json."""
     model_config = ConfigDict(extra="ignore")
@@ -120,6 +162,9 @@ class Settings(BaseModel):
     general: GeneralSettings = Field(default_factory=GeneralSettings)
     prompt: PromptSettings = Field(default_factory=PromptSettings)
     validation: ValidationSettings = Field(default_factory=ValidationSettings)
+    feishu: FeishuSettings = Field(default_factory=FeishuSettings)
+    pushplus: PushPlusSettings = Field(default_factory=PushPlusSettings)
+    tushare: TushareSettings = Field(default_factory=TushareSettings)
 
 
 def provider_api_key_configured(settings: Settings | None) -> bool:
@@ -132,9 +177,41 @@ def provider_api_key_configured(settings: Settings | None) -> bool:
 # ── Persistence ───────────────────────────────────────────────────────────────
 import json
 import logging
+import os
 from pathlib import Path
 
 logger = logging.getLogger(__name__)
+
+
+def _migrate_legacy_feishu_json(raw: dict, settings_path: Path) -> bool:
+    """Merge legacy config/feishu.json into settings.feishu when needed."""
+    legacy_path = settings_path.parent / "feishu.json"
+    if not legacy_path.exists():
+        return False
+
+    feishu = raw.setdefault("feishu", {})
+    if (feishu.get("webhook_url") or "").strip():
+        return False
+
+    try:
+        legacy = json.loads(legacy_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError) as exc:
+        logger.warning("legacy feishu.json unreadable (%s); skipping migration", exc)
+        return False
+
+    migrated = False
+    for key in _FEISHU_CONFIG_KEYS:
+        if key not in legacy:
+            continue
+        value = legacy.get(key)
+        if value in (None, ""):
+            continue
+        if feishu.get(key) in (None, ""):
+            feishu[key] = value
+            migrated = True
+    if migrated:
+        logger.info("Migrated Feishu config from %s into settings.json", legacy_path)
+    return migrated
 
 
 def load_settings(path: Path | None = None) -> "Settings":
@@ -175,7 +252,20 @@ def load_settings(path: Path | None = None) -> "Settings":
     # Migrate legacy encrypted key: drop it, api_key already in provider dict
     raw.setdefault("provider", {}).setdefault("api_key", "")
 
-    return Settings.model_validate(raw)
+    migrated_feishu = _migrate_legacy_feishu_json(raw, path)
+    settings = Settings.model_validate(raw)
+    dirty = migrated_feishu
+    if settings.pushplus.enabled and not settings.pushplus.token.strip():
+        if not (os.environ.get("PUSHPLUS_TOKEN") or "").strip():
+            settings.pushplus.enabled = False
+            logger.info(
+                "PushPlus enabled but token empty — auto-disabled "
+                "(Feishu notifications unaffected)"
+            )
+            dirty = True
+    if dirty:
+        save_settings(settings, path)
+    return settings
 
 
 def save_settings(settings: "Settings", path: Path | None = None) -> None:

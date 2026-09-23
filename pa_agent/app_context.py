@@ -40,7 +40,7 @@ class AppContext:
         from pa_agent.util.event_bus import EventBus
         from pa_agent.util.mask_secret import mask_secret
         from pa_agent.data.factory import create_data_source, normalize_data_source_kind
-        from pa_agent.ai.deepseek_client import DeepSeekClient
+        from pa_agent.ai.client_factory import create_ai_client
         from pa_agent.ai.prompt_assembler import PromptAssembler
         from pa_agent.ai.router import route_strategy_files
         from pa_agent.ai.json_validator import JsonValidator
@@ -52,9 +52,15 @@ class AppContext:
         settings = load_settings(SETTINGS_JSON_PATH)
         from pa_agent.ai.qclaw_connector import sync_qclaw_agent_provider_on_load
         from pa_agent.ai.workbuddy_connector import sync_workbuddy_provider_on_load
+        from pa_agent.ai.cursor_connector import sync_cursor_provider_on_load
+        from pa_agent.ai.trae_connector import sync_trae_cn_provider_on_load
+        from pa_agent.ai.qoder_connector import sync_qoder_cn_provider_on_load
 
         sync_qclaw_agent_provider_on_load(settings, save_path=SETTINGS_JSON_PATH)
         sync_workbuddy_provider_on_load(settings, save_path=SETTINGS_JSON_PATH)
+        sync_cursor_provider_on_load(settings, save_path=SETTINGS_JSON_PATH)
+        sync_trae_cn_provider_on_load(settings, save_path=SETTINGS_JSON_PATH)
+        sync_qoder_cn_provider_on_load(settings, save_path=SETTINGS_JSON_PATH)
 
         # ── Logging (with API key masking) ────────────────────────────────────
         configure_logging(api_key=settings.provider.api_key)
@@ -97,7 +103,9 @@ class AppContext:
             app_logger.warning("Initial data source subscription failed: %s", exc)
 
         # ── AI client ─────────────────────────────────────────────────────────
-        client = DeepSeekClient(settings=settings.provider, logger_=app_logger)
+        from pa_agent.ai.client_factory import create_ai_client
+
+        client = create_ai_client(settings.provider, logger_=app_logger)
 
         # ── Prompt assembler ──────────────────────────────────────────────────
         exp_reader = ExperienceReader(experience_dir=EXPERIENCE_DIR, logger=app_logger)

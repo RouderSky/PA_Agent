@@ -5,9 +5,10 @@ import logging
 from dataclasses import dataclass
 from typing import Any, Callable, Literal
 
-from pa_agent.ai.json_validator import Ok, ValidationError
+from pa_agent.ai.json_validator import Ok, ValidationError, coalesce_model_json_text
+from pa_agent.ai.rate_limit import call_with_rate_limit_backoff
 from pa_agent.ai.retry_feedback import build_retry_feedback, parse_previous_for_cheat
-from pa_agent.ai.retry_policy import detect_cheat, should_retry
+from pa_agent.ai.retry_policy import detect_cheat, extract_feedback_targets, should_retry
 
 logger = logging.getLogger(__name__)
 
@@ -21,6 +22,41 @@ class ValidationRetryResult:
     reply: Any
     attempts: int
     cheat_detected: bool = False
+
+
+def append_assistant_turn(
+    messages: list[dict[str, Any]],
+    reply: Any,
+    *,
+    provider_settings: Any | None = None,
+) -> list[dict[str, Any]]:
+    """Append the successful assistant reply to *messages* for audit completeness."""
+    content = getattr(reply, "content", None) or ""
+    if not content.strip():
+        return messages
+    if messages and messages[-1].get("role") == "assistant":
+        if (messages[-1].get("content") or "").strip() == content.strip():
+            return messages
+    preserve_mimo = False
+    if provider_settings is not None:
+        from pa_agent.ai.mimo_compat import (
+            build_assistant_api_message,
+            is_mimo_provider,
+        )
+
+        preserve_mimo = is_mimo_provider(
+            getattr(provider_settings, "base_url", ""),
+            getattr(provider_settings, "model", ""),
+        )
+    if preserve_mimo:
+        reasoning = getattr(reply, "reasoning_content", None) or ""
+        assistant_msg = build_assistant_api_message(
+            content,
+            reasoning_content=reasoning,
+        )
+    else:
+        assistant_msg = {"role": "assistant", "content": content}
+    return messages + [assistant_msg]
 
 
 def validate_with_retry(
@@ -46,9 +82,13 @@ def validate_with_retry(
     attempt = 0
     previous_raw: str | None = None
     previous_obj: dict[str, Any] | None = None
+    previous_feedback_targets: set[str] = set()
 
     while True:
-        content = getattr(current_reply, "content", None) or ""
+        content = coalesce_model_json_text(
+            getattr(current_reply, "content", None) or "",
+            getattr(current_reply, "reasoning_content", None) or "",
+        )
         result = validator.validate(stage, content, **validate_kwargs)
 
         if isinstance(result, Ok):
@@ -58,7 +98,14 @@ def validate_with_retry(
                     previous_obj,
                     **validate_kwargs,
                 )
-                cheats = detect_cheat(stage, before_norm, result.obj)
+                cheats = detect_cheat(
+                    stage,
+                    before_norm,
+                    result.obj,
+                    before_raw=previous_obj,
+                    after_raw=parse_previous_for_cheat(content),
+                    feedback_mentioned=previous_feedback_targets,
+                )
                 if cheats:
                     logger.warning(
                         "%s retry cheat detected after attempt %d: %s",
@@ -81,7 +128,11 @@ def validate_with_retry(
                     )
             return ValidationRetryResult(
                 result=result,
-                messages=current_messages,
+                messages=append_assistant_turn(
+                    current_messages,
+                    current_reply,
+                    provider_settings=provider_settings,
+                ),
                 reply=current_reply,
                 attempts=attempt + 1,
             )
@@ -112,6 +163,10 @@ def validate_with_retry(
 
         previous_raw = content
         previous_obj = parse_previous_for_cheat(previous_raw)
+        previous_feedback_targets = extract_feedback_targets(
+            err.invalid_fields,
+            err.missing_fields,
+        )
 
         feedback = build_retry_feedback(
             err,
@@ -144,4 +199,12 @@ def validate_with_retry(
             assistant_msg,
             {"role": "user", "content": feedback},
         ]
-        current_reply = call_api(current_messages)
+        # Guard the retry request against transient rate limits so a 429 does
+        # not turn a single format error into a chain of hard failures. The
+        # client layer already backs off, but wrapping here also covers clients
+        # that raise without their own retry, and keeps the loop responsive.
+        current_reply = call_with_rate_limit_backoff(
+            lambda: call_api(current_messages),
+            log=logger,
+            stage_label=f"{stage} retry",
+        )

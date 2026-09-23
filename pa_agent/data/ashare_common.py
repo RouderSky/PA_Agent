@@ -25,23 +25,6 @@ PRESET_SYMBOLS: tuple[str, ...] = (
 )
 
 
-def normalize_ashare_symbol(symbol: str) -> str:
-    """Normalize user input to 6-digit code or index id (sh000300)."""
-    raw = (symbol or "").strip()
-    if not raw:
-        return ""
-    m = _INDEX_PREFIX_RE.match(raw)
-    if m:
-        prefix, digits = m.group(1).lower(), m.group(2)
-        if _is_index_digits(digits):
-            return f"{prefix}{digits}"
-        return digits
-    digits = re.sub(r"\D", "", raw)
-    if len(digits) >= 6:
-        return digits[-6:]
-    return digits
-
-
 def _is_index_digits(digits: str) -> bool:
     return digits in {
         "000300",
@@ -52,6 +35,28 @@ def _is_index_digits(digits: str) -> bool:
         "399006",
         "399300",
     }
+
+
+def _keep_index_prefix(prefix: str, digits: str) -> bool:
+    """Index ids that need sh/sz prefix — bare 6-digit form is a stock (e.g. 000001 平安银行)."""
+    return prefix == "sh" and digits == "000001"
+
+
+def normalize_ashare_symbol(symbol: str) -> str:
+    """Normalize user input to 6-digit code or index id (sh000300)."""
+    raw = (symbol or "").strip()
+    if not raw:
+        return ""
+    m = _INDEX_PREFIX_RE.match(raw)
+    if m:
+        prefix, digits = m.group(1).lower(), m.group(2)
+        if _is_index_digits(digits) or _keep_index_prefix(prefix, digits):
+            return f"{prefix}{digits}"
+        return digits
+    digits = re.sub(r"\D", "", raw)
+    if len(digits) >= 6:
+        return digits[-6:]
+    return digits
 
 
 def is_index_symbol(symbol: str) -> bool:
@@ -95,6 +100,19 @@ def ashare_trading_day(now: datetime | None = None) -> bool:
         return False
     t = now.hour * 60 + now.minute
     return 9 * 60 + 30 <= t < 15 * 60
+
+
+def ashare_after_close_today(now: datetime | None = None) -> bool:
+    """True on A-share trading days AFTER market close (15:00–23:59 CN).
+
+    Used to detect the window where today's daily bar should be closed and
+    included in analysis, but data sources may have a delay returning it.
+    """
+    now = now or cn_now()
+    if now.weekday() >= 5:
+        return False
+    t = now.hour * 60 + now.minute
+    return t >= 15 * 60
 
 
 def ashare_head_bar_live(timeframe: str, now: datetime | None = None) -> bool:
@@ -165,6 +183,64 @@ def ensure_today_forming_daily_bar(
             "volume": vol,
             "amount": float(session_amount) if session_amount > 0 else 0.0,
             "pct_chg": ((price - prev_close) / prev_close * 100.0) if prev_close > 0 else None,
+        }
+    )
+    return True
+
+
+def ensure_today_closed_daily_bar(
+    rows_asc: list[dict[str, Any]],
+    *,
+    symbol: str,
+    session_open: float = 0.0,
+    session_high: float = 0.0,
+    session_low: float = 0.0,
+    session_close: float = 0.0,
+    session_volume_lots: float = 0.0,
+    session_amount: float = 0.0,
+    now: datetime | None = None,
+) -> bool:
+    """收盘后（15:00 之后）若数据源未包含当日已收盘日线，用盘口数据补一根已收盘 K 线。
+
+    与 ensure_today_forming_daily_bar 不同，此函数用于收盘后场景：
+    - Baostock 等数据源可能在 15:00-18:00 之间尚未更新当日数据
+    - 东方财富五档/现价接口仍可获取当日完整 OHLCV
+    - 补充的 K 线标记为已收盘（不再变动）
+    """
+    from datetime import time as time_cls
+
+    if not rows_asc:
+        return False
+    now = now or cn_now()
+    if not ashare_after_close_today(now):
+        return False
+    today = now.date()
+    # 如果最后一根 bar 已经是今天的，不需要补充
+    if bar_trade_date(int(rows_asc[-1]["ts_open"])) >= today:
+        return False
+    # 必须有有效的收盘价
+    if not session_close or session_close <= 0:
+        return False
+
+    prev_close = float(rows_asc[-1]["close"])
+    close = float(session_close)
+    open_ = float(session_open) if session_open > 0 else close
+    high = float(session_high) if session_high > 0 else max(open_, close)
+    low = float(session_low) if session_low > 0 else min(open_, close)
+    high = max(high, open_, close)
+    low = min(low, open_, close)
+    vol = quote_volume_lots_to_shares(session_volume_lots, symbol=symbol)
+    today_ms = int(datetime.combine(today, time_cls(0, 0), tzinfo=_CN_TZ).timestamp() * 1000)
+    rows_asc.append(
+        {
+            "ts_open": today_ms,
+            "open": open_,
+            "high": high,
+            "low": low,
+            "close": close,
+            "volume": vol,
+            "amount": float(session_amount) if session_amount > 0 else 0.0,
+            "pct_chg": ((close - prev_close) / prev_close * 100.0) if prev_close > 0 else None,
         }
     )
     return True
@@ -402,6 +478,7 @@ def rows_to_kline_bars(rows_newest_first: list[dict[str, Any]], n: int) -> list[
 _cn_now = cn_now
 _ashare_session_open = ashare_session_open
 _ashare_trading_day = ashare_trading_day
+_ashare_after_close_today = ashare_after_close_today
 _ashare_head_bar_live = ashare_head_bar_live
 _row_time_to_ts_ms = row_time_to_ts_ms
 _df_to_bars_asc = df_to_bars_asc

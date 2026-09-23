@@ -34,6 +34,12 @@ _PATTERN_KEYWORD_TAGS: tuple[tuple[tuple[str, ...], str], ...] = (
     (("h1", "h2", "l1", "l2", "计数入场", "high1", "high2", "low1", "low2"), "h1"),
     (("always in", "ail", "ais", "20gb", "缺口棒"), "always_in"),
     (("磁力", "套住", "trapped", "信号失败"), "failed_signal"),
+    (("双顶", "双底", "双重顶", "双重底", "double top", "double bottom"), "double_top_bottom"),
+    (("上升三角形",), "ascending_triangle"),
+    (("下降三角形",), "descending_triangle"),
+    (("对称三角形",), "symmetrical_triangle"),
+    (("扩张三角形",), "expanding_triangle"),
+    (("最终旗形", "final flag", "ffes"), "final_flag"),
 )
 
 _CYCLE_POSITION_PATTERN_TAGS: dict[str, tuple[str, ...]] = {
@@ -58,15 +64,19 @@ STAGE1_DETECTED_PATTERNS_GUIDE = """
 |-----|----------|------------|
 | wedge | 三次同向推进、幅度递减、趋势线/通道收敛；含楔形回撤与楔形反转 | 文件14-楔形形态分析交易.txt |
 | reversal_attempt | 反转尝试、MTR 前后结构、final flag、明显二次测试失败 | 文件15-二次入场机会.txt |
-| mtr | 主要趋势反转结构已成型（常与 reversal_attempt 同现） | 文件15（叠加） |
-| final_flag | 趋势末段 final flag / 末端旗形 | 文件15（叠加） |
+| mtr | 主要趋势反转结构已成型（常与 reversal_attempt 同现） | 文件15（叠加）、文件25 |
+| final_flag | 趋势末段 final flag / 末端旗形 | 文件15（叠加）、文件24 |
 | h1 / h2 / l1 / l2 | 计数入场结构（High1/High2/Low1/Low2） | 文件19-H1H2-L1L2计数.txt |
-| breakout_test | 突破后回测突破位、突破测试棒 | 程序自动加载（按 key 路由） |
-| breakout_pullback | 突破失败后的再次失败（突破回踩）顺势机会 | 程序自动加载（按 key 路由） |
-| breakout_failure / failed_breakout | 普通突破失败、假突破 | 程序自动加载（按 key 路由） |
+| breakout_test | 突破后回测突破位、突破测试棒 | 文件18 |
+| breakout_pullback | 突破失败后的再次失败（突破回踩）顺势机会 | 文件18 |
+| breakout_failure / failed_breakout | 普通突破失败、假突破 | 文件18、文件22 |
 | always_in / ail / ais / 20gb / gap_bar | Always In、20GB、缺口棒等 | 文件20-AlwaysIn与20GB.txt |
 | barbwire / wire / overlap / middle_range | 铁丝网、重叠、区间中部 | 文件21-铁丝网与无交易环境.txt |
 | failed_signal / magnet / trapped_traders | 信号失败后磁力位、交易者被套 | 文件22-信号失败后的磁力位.txt |
+| ascending_triangle / descending_triangle / symmetrical_triangle / expanding_triangle | 三角形收敛形态 | 文件27-三角形与收敛形态.txt |
+| double_top_bottom | 双顶、双底、微型双顶底 | 文件28-双重顶底与微型结构.txt |
+
+阶段二常驻（非 pattern 触发）：文件23（Measured Move）。
 
 **与 entry_setup_type 对齐：**
 - entry_setup_type=wedge → detected_patterns 须含 wedge
@@ -89,10 +99,63 @@ STAGE1_PATTERN_BRIEFS_BLOCK = """
 **barbwire / overlap / middle_range**：铁丝网、重叠、区间中部或边界；entry_setup_type=tr_boundary 时两者均应写入 detected_patterns。
 **always_in / 20gb**：强趋势连续同向棒；逆势需双确认。
 **failed_signal / magnet**：信号棒失败后价格被吸向磁力位。
+**final_flag / mtr**：最终旗形、主要趋势反转见文件24/25。
+**double_top_bottom / 三角形**：见文件28/27。
 """.strip()
 
 
-def _collect_detected_pattern_tags(stage1_json: dict[str, Any]) -> list[str]:
+def _barbwire_blocked(stage1_json: dict[str, Any]) -> bool:
+    """True when program_features explicitly forbids barbwire auto-tagging."""
+    pf = stage1_json.get("program_features")
+    if isinstance(pf, dict) and pf.get("barbwire_candidate") is False:
+        return True
+    return False
+
+
+def _barbwire_candidate(stage1_json: dict[str, Any], kline_frame: Any = None) -> bool:
+    if _barbwire_blocked(stage1_json):
+        return False
+    pf = stage1_json.get("program_features")
+    if isinstance(pf, dict) and "barbwire_candidate" in pf:
+        return bool(pf["barbwire_candidate"])
+    if kline_frame is not None:
+        try:
+            from pa_agent.ai.market_features import compute_simple_market_features
+
+            return compute_simple_market_features(kline_frame).barbwire_candidate
+        except Exception:
+            pass
+    return False
+
+
+def _barbwire_keyword_negated(text: str) -> bool:
+    """Skip keyword sync when narrative discusses sub-threshold barbwire score."""
+    lowered = text.lower()
+    if "未达阈值" in lowered and "铁丝网" in lowered:
+        return True
+    if re.search(r"铁丝网分数\s*0\.\d+", lowered) and "未达" in lowered:
+        return True
+    return False
+
+
+def _should_sync_barbwire_tag(
+    stage1_json: dict[str, Any],
+    text: str,
+    *,
+    kline_frame: Any = None,
+) -> bool:
+    if _barbwire_blocked(stage1_json):
+        return False
+    if _barbwire_keyword_negated(text):
+        return False
+    return _barbwire_candidate(stage1_json, kline_frame)
+
+
+def _collect_detected_pattern_tags(
+    stage1_json: dict[str, Any],
+    *,
+    kline_frame: Any = None,
+) -> list[str]:
     """Merge model tags + entry_setup_type + key_signals heuristics (stable order)."""
     raw = stage1_json.get("detected_patterns") or []
     patterns: list[str] = []
@@ -105,12 +168,16 @@ def _collect_detected_pattern_tags(stage1_json: dict[str, Any]) -> list[str]:
 
     est = _entry_setup_type(stage1_json)
     for key in ENTRY_SETUP_TYPE_PATTERN_OVERLAY.get(est, ()):
+        if key == "barbwire" and not _barbwire_candidate(stage1_json, kline_frame):
+            continue
         if key not in seen:
             seen.add(key)
             patterns.append(key)
 
     cp = str(stage1_json.get("cycle_position", "") or "").strip().lower()
     for key in _CYCLE_POSITION_PATTERN_TAGS.get(cp, ()):
+        if key == "barbwire" and not _barbwire_candidate(stage1_json, kline_frame):
+            continue
         if key not in seen:
             seen.add(key)
             patterns.append(key)
@@ -126,6 +193,11 @@ def _collect_detected_pattern_tags(stage1_json: dict[str, Any]) -> list[str]:
                         seen.add(hl)
                         patterns.append(hl)
             continue
+        if tag == "barbwire":
+            if not any(k.lower() in text for k in keywords):
+                continue
+            if not _should_sync_barbwire_tag(stage1_json, text, kline_frame=kline_frame):
+                continue
         if any(k.lower() in text for k in keywords) and tag not in seen:
             seen.add(tag)
             patterns.append(tag)
@@ -133,16 +205,24 @@ def _collect_detected_pattern_tags(stage1_json: dict[str, Any]) -> list[str]:
     return patterns
 
 
-def sync_detected_patterns_field(stage1_json: dict[str, Any]) -> list[str]:
+def sync_detected_patterns_field(
+    stage1_json: dict[str, Any],
+    *,
+    kline_frame: Any = None,
+) -> list[str]:
     """Write merged tags back into stage1_json['detected_patterns'] (in-place)."""
-    patterns = _collect_detected_pattern_tags(stage1_json)
+    patterns = _collect_detected_pattern_tags(stage1_json, kline_frame=kline_frame)
     stage1_json["detected_patterns"] = patterns
     return patterns
 
 
-def merge_detected_patterns(stage1_json: dict[str, Any]) -> list[str]:
+def merge_detected_patterns(
+    stage1_json: dict[str, Any],
+    *,
+    kline_frame: Any = None,
+) -> list[str]:
     """Union of detected_patterns and entry_setup_type overlay (stable order)."""
-    return _collect_detected_pattern_tags(stage1_json)
+    return _collect_detected_pattern_tags(stage1_json, kline_frame=kline_frame)
 
 
 def _mentions_hl_count_setup(text: str) -> bool:
@@ -171,10 +251,14 @@ def _hl_tags_from_text(text: str) -> list[str]:
     return tags
 
 
-def ensure_detected_patterns_coherent(stage1_json: dict[str, Any]) -> bool:
+def ensure_detected_patterns_coherent(
+    stage1_json: dict[str, Any],
+    *,
+    kline_frame: Any = None,
+) -> bool:
     """Auto-add detected_patterns tags implied by key_signals / entry_setup_type."""
     before = list(stage1_json.get("detected_patterns") or [])
-    sync_detected_patterns_field(stage1_json)
+    sync_detected_patterns_field(stage1_json, kline_frame=kline_frame)
     patterns: list[str] = list(stage1_json.get("detected_patterns") or [])
     seen = {str(p).strip().lower() for p in patterns}
 
@@ -194,6 +278,11 @@ def ensure_detected_patterns_coherent(stage1_json: dict[str, Any]) -> bool:
     for keywords, required in _PATTERN_KEYWORD_TAGS:
         if required == "h1":
             continue
+        if required == "barbwire":
+            if not any(k.lower() in text for k in keywords):
+                continue
+            if not _should_sync_barbwire_tag(stage1_json, text, kline_frame=kline_frame):
+                continue
         if any(k.lower() in text for k in keywords) and required not in seen:
             seen.add(required)
             patterns.append(required)
@@ -208,6 +297,8 @@ def ensure_detected_patterns_coherent(stage1_json: dict[str, Any]) -> bool:
         changed = True
     if est == "tr_boundary":
         for required in ("middle_range", "barbwire"):
+            if required == "barbwire" and not _barbwire_candidate(stage1_json, kline_frame):
+                continue
             if required not in seen:
                 seen.add(required)
                 patterns.append(required)
@@ -218,7 +309,11 @@ def ensure_detected_patterns_coherent(stage1_json: dict[str, Any]) -> bool:
     return changed
 
 
-def validate_detected_patterns_vs_key_signals(stage1: dict[str, Any]) -> list[str]:
+def validate_detected_patterns_vs_key_signals(
+    stage1: dict[str, Any],
+    *,
+    kline_frame: Any = None,
+) -> list[str]:
     """Warn when narrative mentions a pattern but detected_patterns omits the router key."""
     errors: list[str] = []
     patterns = {str(p).strip().lower() for p in (stage1.get("detected_patterns") or [])}
@@ -235,6 +330,11 @@ def validate_detected_patterns_vs_key_signals(stage1: dict[str, Any]) -> list[st
                         "detected_patterns lacks h1/h2/l1/l2"
                     )
             continue
+        if required == "barbwire":
+            if not any(k.lower() in text for k in keywords):
+                continue
+            if not _should_sync_barbwire_tag(stage1, text, kline_frame=kline_frame):
+                continue
         if any(k.lower() in text for k in keywords):
             if required not in patterns:
                 errors.append(
@@ -254,6 +354,8 @@ def validate_detected_patterns_vs_key_signals(stage1: dict[str, Any]) -> list[st
         )
     if est == "tr_boundary":
         for required in ("middle_range", "barbwire"):
+            if required == "barbwire" and not _barbwire_candidate(stage1, kline_frame):
+                continue
             if required not in patterns:
                 errors.append(
                     f"bar_analysis.entry_setup_type=tr_boundary requires "

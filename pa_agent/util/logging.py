@@ -4,11 +4,13 @@ Public API
 ----------
 configure_logging(api_key: str = "") -> None
 update_api_key(new_key: str) -> None
+verify_logging_handlers() -> bool
 """
 from __future__ import annotations
 
 import logging
 import logging.handlers
+from pathlib import Path
 from typing import List
 
 from pa_agent.config.paths import LOG_FILE_PATH
@@ -57,19 +59,34 @@ _QUIET_LOGGER_NAMES = (
 )
 
 
+def verify_logging_handlers() -> bool:
+    """Return True when the expected rotating file handler is attached to root."""
+    expected = str(LOG_FILE_PATH.resolve())
+    for handler in logging.getLogger().handlers:
+        if isinstance(handler, logging.handlers.RotatingFileHandler):
+            base = getattr(handler, "baseFilename", "")
+            if str(Path(base).resolve()) == expected:
+                return True
+    return False
+
+
 def configure_logging(api_key: str = "") -> None:
     """Configure the root logger with rotating file handler and console handler.
 
     Both handlers use MaskingFormatter that replaces api_key with mask_secret(api_key).
     Third-party loggers (urllib3, openai, httpx) are also attached to the same handlers.
+
+    If handlers were removed after a prior configure_logging call, re-attaches them.
     """
     global _configured  # noqa: PLW0603
 
     if _configured:
-        # Only update the masking key if already configured; skip re-adding handlers.
         if api_key:
             update_api_key(api_key)
-        return
+        if verify_logging_handlers():
+            return
+        # Handlers missing (e.g. external code cleared root.handlers) — re-install.
+        _configured = False
 
     # Build formatters
     file_formatter = MaskingFormatter(_LOG_FORMAT, api_key=api_key)
@@ -119,6 +136,9 @@ def configure_logging(api_key: str = "") -> None:
     _silence_noisy_libraries()
 
     _configured = True
+    logging.getLogger("pa_agent.diagnostics").info(
+        "configure_logging: handlers attached (log_file=%s)", LOG_FILE_PATH
+    )
 
 
 def _silence_noisy_libraries() -> None:

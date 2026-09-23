@@ -12,6 +12,7 @@ if TYPE_CHECKING:
 # Line colors
 _COLOR_ENTRY = QColor(30, 144, 255)   # dodger blue
 _COLOR_TP = QColor(0, 200, 80)        # green
+_COLOR_TP2 = QColor(100, 220, 140)    # lighter green
 _COLOR_SL = QColor(220, 50, 50)       # red
 
 
@@ -44,8 +45,11 @@ class OverlayLines:
         entry: float,
         tp: float,
         sl: float,
+        *,
+        tp2: float | None = None,
+        continuity: bool = False,
     ) -> None:
-        """Draw (or redraw) the three horizontal price lines.
+        """Draw (or redraw) horizontal price lines.
 
         Clears any previously drawn lines first. Labels are anchored to the
         left edge of the current view and stay there on pan/zoom.
@@ -53,11 +57,14 @@ class OverlayLines:
         self.clear_lines(plot)
         self._plot = plot
 
-        specs = [
-            (entry, _COLOR_ENTRY, "Entry"),
-            (tp, _COLOR_TP, "TP"),
-            (sl, _COLOR_SL, "SL"),
+        wait_suffix = " (延续)" if continuity else ""
+        specs: list[tuple[float, QColor, str]] = [
+            (entry, _COLOR_ENTRY, f"Entry{wait_suffix}"),
+            (tp, _COLOR_TP, f"TP1{wait_suffix}"),
+            (sl, _COLOR_SL, f"SL{wait_suffix}"),
         ]
+        if tp2 is not None:
+            specs.insert(2, (tp2, _COLOR_TP2, f"TP2{wait_suffix}"))
 
         for price, color, label_text in specs:
             line = pg.InfiniteLine(

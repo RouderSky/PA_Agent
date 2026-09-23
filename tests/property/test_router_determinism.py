@@ -25,6 +25,7 @@ _ALL_VALID_FILES = frozenset([
     "市场诊断框架.txt",
     "文件16-K线信号识别.txt",
     "文件17-止损和止盈与仓位管理.txt",
+    "文件23-MeasuredMove与结构目标.txt",
     "上涨通道分析识别.txt",
     "上涨通道交易策略.txt",
     "文件13-窄通道与宽通道策略.txt",
@@ -43,6 +44,10 @@ _ALL_VALID_FILES = frozenset([
     "文件20-AlwaysIn与20GB.txt",
     "文件21-铁丝网与无交易环境.txt",
     "文件22-信号失败后的磁力位.txt",
+    "文件24-最终旗形与趋势末端.txt",
+    "文件25-主要趋势反转MTR.txt",
+    "文件27-三角形与收敛形态.txt",
+    "文件28-双重顶底与微型结构.txt",
 ])
 
 
@@ -136,6 +141,7 @@ def test_router_alternative_cycle_position_adds_secondary_files() -> None:
         "震荡区间分析识别.txt",
         "震荡区间交易策略.txt",
         "文件15-二次入场机会.txt",
+        "文件25-主要趋势反转MTR.txt",
         "文件19-H1H2-L1L2计数.txt",
     ]
 

@@ -53,6 +53,17 @@ def find_latest_successful_record(
     directory: Path | None = None,
 ) -> AnalysisRecord | None:
     """Find the newest full successful record for a symbol/timeframe."""
+    root = directory or RECORDS_PENDING_DIR
+    cache_key = (str(root.resolve()), symbol, timeframe)
+    try:
+        dir_mtime = root.stat().st_mtime if root.is_dir() else 0.0
+    except OSError:
+        dir_mtime = 0.0
+    cached = _LATEST_RECORD_CACHE.get(cache_key)
+    if cached is not None and cached[0] == dir_mtime:
+        return cached[1]
+
+    result: AnalysisRecord | None = None
     for path in list_record_paths(directory):
         record = load_record(path)
         if record is None:
@@ -65,8 +76,18 @@ def find_latest_successful_record(
             continue
         if not record.kline_data:
             continue
-        return record
-    return None
+        result = record
+        break
+    _LATEST_RECORD_CACHE[cache_key] = (dir_mtime, result)
+    return result
+
+
+_LATEST_RECORD_CACHE: dict[tuple[str, str, str], tuple[float, AnalysisRecord | None]] = {}
+
+
+def invalidate_latest_record_cache() -> None:
+    """Clear cached latest-record lookups (call after saving a new record)."""
+    _LATEST_RECORD_CACHE.clear()
 
 
 def compute_incremental_bar_delta(

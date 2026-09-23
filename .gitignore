@@ -23,6 +23,7 @@ config/settings.local.json
 config/exception_state.json
 config/secret.key
 config/tv_symbol_aliases.json
+config/feishu.json
 *.pem
 *.key
 
@@ -63,6 +64,9 @@ MAC*.txt
 *智能体*.txt
 !MAC版本智能体部署方法.txt
 !把这个扔给龙虾-智能体部署方法.txt
+
+# ── uv 缓存目录 ────────────────────────────────────────────────────────────────
+.uv/
 
 # ── IDE / Agent 本地目录 ─────────────────────────────────────────────────────
 .idea/

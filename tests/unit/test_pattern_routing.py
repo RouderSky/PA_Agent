@@ -94,6 +94,7 @@ def test_tr_boundary_syncs_middle_range_and_barbwire() -> None:
         "detected_patterns": [],
         "key_signals": ["价格逼近区间下沿"],
         "bar_analysis": {"entry_setup_type": "tr_boundary"},
+        "program_features": {"barbwire_candidate": True, "barbwire_score": 0.72},
     }
     from pa_agent.ai.pattern_routing import sync_detected_patterns_field
     from pa_agent.ai.stage1_normalizer import normalize_stage1
@@ -104,6 +105,19 @@ def test_tr_boundary_syncs_middle_range_and_barbwire() -> None:
     assert "barbwire" in tags
     files = route_strategy_files(out)
     assert "文件21-铁丝网与无交易环境.txt" in files
+
+
+def test_route_loads_spike_files_for_micro_channel_active() -> None:
+    s1 = {
+        "cycle_position": "micro_channel",
+        "direction": "bullish",
+        "spike_stage": "active",
+        "detected_patterns": [],
+    }
+    files = route_strategy_files(s1)
+    assert "极速上涨分析识别.txt" in files
+    assert "极速上涨交易策略.txt" in files
+    assert "上涨通道分析识别.txt" in files
 
 
 def test_ema_gap_count_does_not_trigger_hl_count_setup() -> None:
@@ -131,3 +145,34 @@ def test_entry_setup_wedge_requires_detected_patterns_tag() -> None:
     }
     errs = validate_detected_patterns_vs_key_signals(s1)
     assert any("entry_setup_type=wedge" in e for e in errs)
+
+
+def test_barbwire_not_synced_from_subthreshold_risk_warning() -> None:
+    from pa_agent.ai.pattern_routing import ensure_detected_patterns_coherent
+
+    s1 = {
+        "cycle_position": "trading_range",
+        "direction": "neutral",
+        "detected_patterns": [],
+        "risk_warning": "铁丝网分数0.20未达阈值，区间中部不宜追单",
+        "program_features": {"barbwire_candidate": False, "barbwire_score": 0.2},
+        "bar_analysis": {"entry_setup_type": "none"},
+    }
+    ensure_detected_patterns_coherent(s1)
+    assert "barbwire" not in s1["detected_patterns"]
+
+
+def test_tr_boundary_skips_barbwire_when_not_candidate() -> None:
+    from pa_agent.ai.pattern_routing import ensure_detected_patterns_coherent
+
+    s1 = {
+        "cycle_position": "trending_tr",
+        "direction": "bullish",
+        "detected_patterns": [],
+        "bar_analysis": {"entry_setup_type": "tr_boundary"},
+        "program_features": {"barbwire_candidate": False, "barbwire_score": 0.2},
+    }
+    ensure_detected_patterns_coherent(s1)
+    tags = set(s1["detected_patterns"])
+    assert "middle_range" in tags
+    assert "barbwire" not in tags

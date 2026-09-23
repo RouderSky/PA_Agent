@@ -207,6 +207,13 @@ def forming_bar_has_closed(
 ) -> bool:
     """True when the waited bar finished (new bar appeared or head is no longer forming)."""
     if not bars_newest_first:
+        # bars 为空 (数据拉取失败): 用时间判断是否已过收盘时间, 避免倒计时走完却不提交
+        if now_ms is None:
+            now_ms = int(time.time() * 1000)
+        duration_s = timeframe_to_seconds(timeframe) if timeframe else None
+        if duration_s is not None:
+            close_ms = int(waited_ts_open) + duration_s * 1000
+            return int(now_ms) >= close_ms
         return False
     if not has_forming_bar_at_head(
         bars_newest_first, timeframe, now_ms=now_ms, symbol=symbol

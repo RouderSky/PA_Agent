@@ -3,7 +3,7 @@
 Task 15.5 — pytest-qt tests:
 - Progress bar turns yellow at 80% context usage.
 - Progress bar turns red at 95% context usage.
-- QMessageBox.warning is shown exactly once at 95%.
+- No QMessageBox.warning at 95% (context dialogs disabled).
 
 Validates: Requirements R10.5, R15.4
 """
@@ -41,14 +41,8 @@ def _make_data(context_used: int, context_window: int = 1_000_000) -> dict:
 
 # ── Yellow threshold (80%) ────────────────────────────────────────────────────
 
-def test_progress_bar_yellow_at_80_pct(widget, monkeypatch):
+def test_progress_bar_yellow_at_80_pct(widget):
     """Progress bar stylesheet should switch to yellow at exactly 80%."""
-    # Patch QMessageBox.warning to prevent any dialog from blocking
-    monkeypatch.setattr(
-        "pa_agent.gui.conversation_widget.QMessageBox.warning",
-        lambda *args, **kwargs: None,
-    )
-
     widget.update_token_display(_make_data(800_000))  # 80%
 
     style = widget._progress_bar.styleSheet()
@@ -57,13 +51,8 @@ def test_progress_bar_yellow_at_80_pct(widget, monkeypatch):
     )
 
 
-def test_progress_bar_not_yellow_below_80_pct(widget, monkeypatch):
+def test_progress_bar_not_yellow_below_80_pct(widget):
     """Progress bar should have no special colour below 80%."""
-    monkeypatch.setattr(
-        "pa_agent.gui.conversation_widget.QMessageBox.warning",
-        lambda *args, **kwargs: None,
-    )
-
     widget.update_token_display(_make_data(799_999))  # just under 80%
 
     style = widget._progress_bar.styleSheet()
@@ -73,14 +62,8 @@ def test_progress_bar_not_yellow_below_80_pct(widget, monkeypatch):
 
 # ── Red threshold (95%) ───────────────────────────────────────────────────────
 
-def test_progress_bar_red_at_95_pct(widget, monkeypatch):
+def test_progress_bar_red_at_95_pct(widget):
     """Progress bar stylesheet should switch to red at exactly 95%."""
-    warning_calls: list = []
-    monkeypatch.setattr(
-        "pa_agent.gui.conversation_widget.QMessageBox.warning",
-        lambda *args, **kwargs: warning_calls.append(args),
-    )
-
     widget.update_token_display(_make_data(950_000))  # 95%
 
     style = widget._progress_bar.styleSheet()
@@ -89,28 +72,24 @@ def test_progress_bar_red_at_95_pct(widget, monkeypatch):
     )
 
 
-def test_qmessagebox_shown_once_at_95_pct(widget, monkeypatch):
-    """QMessageBox.warning should be called exactly once when crossing 95%."""
+def test_qmessagebox_not_shown_at_95_pct(widget, monkeypatch):
+    """QMessageBox.warning must not appear at 95% (dialogs disabled)."""
     warning_calls: list = []
     monkeypatch.setattr(
-        "pa_agent.gui.conversation_widget.QMessageBox.warning",
+        "PyQt6.QtWidgets.QMessageBox.warning",
         lambda *args, **kwargs: warning_calls.append(args),
     )
 
-    # First call at 95% — should trigger warning
     widget.update_token_display(_make_data(950_000))
-    assert len(warning_calls) == 1, "Expected exactly 1 warning at 95%"
-
-    # Second call still at 95% — should NOT trigger again (one-time flag)
     widget.update_token_display(_make_data(960_000))
-    assert len(warning_calls) == 1, "Warning should only fire once"
+    assert len(warning_calls) == 0, "Context warning dialog should be disabled"
 
 
 def test_qmessagebox_not_shown_at_80_pct(widget, monkeypatch):
     """QMessageBox.warning should NOT be called at 80% (yellow only)."""
     warning_calls: list = []
     monkeypatch.setattr(
-        "pa_agent.gui.conversation_widget.QMessageBox.warning",
+        "PyQt6.QtWidgets.QMessageBox.warning",
         lambda *args, **kwargs: warning_calls.append(args),
     )
 
@@ -121,13 +100,8 @@ def test_qmessagebox_not_shown_at_80_pct(widget, monkeypatch):
 
 # ── Red overrides yellow ──────────────────────────────────────────────────────
 
-def test_red_overrides_yellow(widget, monkeypatch):
+def test_red_overrides_yellow(widget):
     """When usage jumps from 80% to 95%, bar should be red (not yellow)."""
-    monkeypatch.setattr(
-        "pa_agent.gui.conversation_widget.QMessageBox.warning",
-        lambda *args, **kwargs: None,
-    )
-
     widget.update_token_display(_make_data(800_000))  # 80% → yellow
     widget.update_token_display(_make_data(950_000))  # 95% → red
 
@@ -137,32 +111,8 @@ def test_red_overrides_yellow(widget, monkeypatch):
 
 # ── Progress bar value ────────────────────────────────────────────────────────
 
-def test_progress_bar_value_matches_percentage(widget, monkeypatch):
+def test_progress_bar_value_matches_percentage(widget):
     """Progress bar integer value should match the rounded percentage."""
-    monkeypatch.setattr(
-        "pa_agent.gui.conversation_widget.QMessageBox.warning",
-        lambda *args, **kwargs: None,
-    )
-
     widget.update_token_display(_make_data(342_000))  # 34.2%
 
     assert widget._progress_bar.value() == 34
-
-
-# ── Clear resets warning flag ─────────────────────────────────────────────────
-
-def test_clear_resets_red_warning_flag(widget, monkeypatch):
-    """After clear(), the 95% warning should fire again on next update."""
-    warning_calls: list = []
-    monkeypatch.setattr(
-        "pa_agent.gui.conversation_widget.QMessageBox.warning",
-        lambda *args, **kwargs: warning_calls.append(args),
-    )
-
-    widget.update_token_display(_make_data(950_000))  # fires once
-    assert len(warning_calls) == 1
-
-    widget.clear()  # resets flag
-
-    widget.update_token_display(_make_data(950_000))  # should fire again
-    assert len(warning_calls) == 2, "Warning should fire again after clear()"

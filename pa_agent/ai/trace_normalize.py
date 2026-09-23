@@ -29,6 +29,15 @@ _GATE_12_GENERIC_BRANCHES = frozenset(
 
 _BAR_RANGE_RE = re.compile(r"^K(\d+)-K(\d+)$", re.IGNORECASE)
 _SINGLE_BAR_RE = re.compile(r"^K(\d+)$", re.IGNORECASE)
+_PROG_REF_BLOCK_RE = re.compile(r"【程序参考数据（[^】]*）：.*?】", re.DOTALL)
+
+# Model-invented summary nodes (not in decision tree); gate_result belongs in gate_result field.
+_GATE_END_NODE_IDS = frozenset({"gate_end", "gate_summary", "summary"})
+_GATE_RESULT_ANSWER_ALIASES: dict[str, str] = {
+    "proceed": "是",
+    "wait": "等待",
+    "unknown": "中性",
+}
 
 # node_id -> {raw answer -> (canonical answer, branch)}
 _NODE_ANSWER_BY_ID: dict[str, dict[str, tuple[str, str]]] = {
@@ -98,6 +107,21 @@ _NODE_ANSWER_BY_ID: dict[str, dict[str, tuple[str, str]]] = {
         "B": ("是", "path_b"),
         "C": ("是", "path_c"),
     },
+    "2.2": {
+        "冲突": ("是", "conflict"),
+        "背景冲突": ("是", "conflict"),
+        "方向冲突": ("是", "conflict"),
+        "新旧冲突": ("是", "conflict"),
+        "conflict": ("是", "conflict"),
+        "同向": ("是", "aligned"),
+        "共振": ("是", "aligned"),
+        "方向一致": ("是", "aligned"),
+        "aligned": ("是", "aligned"),
+        "中性背景": ("中性", "neutral_background"),
+        "背景中性": ("中性", "neutral_background"),
+        "neutral_background": ("中性", "neutral_background"),
+        "mixed": ("中性", "mixed"),
+    },
 }
 
 _GENERIC_ANSWER: dict[str, str] = {
@@ -113,6 +137,9 @@ _GENERIC_ANSWER: dict[str, str] = {
     "fail": "否",
     "yes": "是",
     "no": "否",
+    "not_applicable": "不适用",
+    "n/a": "不适用",
+    "na": "不适用",
     # Common AI synonyms outside the strict enum (map before schema validation).
     "部分": "中性",
     "部分一致": "中性",
@@ -120,12 +147,14 @@ _GENERIC_ANSWER: dict[str, str] = {
     "部分符合": "中性",
     "部分是": "中性",
     "部分否": "否",
+    "是部分": "中性",
     "待确认": "等待",
     "待定": "等待",
     "需确认": "等待",
     "尚未确认": "等待",
     "未确认": "等待",
     "不确定": "中性",
+    "中立": "中性",
 }
 
 _BAR_RANGE_ALIASES = frozenset({"全局", "全图", "整体", "全部", "all"})
@@ -255,10 +284,9 @@ def fix_bar_range_string(text: str, *, default_max_seq: int | None = None) -> st
             capped = _cap_bar_seq(a, default_max_seq)
             return f"K{capped}"
         if a < b:
-            logger.warning(
+            logger.debug(
                 "bar_range=%r has reversed order (K%d before K%d); "
-                "K1=newest, K{N}=older. Auto-fixing to K%d-K%d but this "
-                "may indicate the model misinterprets bar numbering direction.",
+                "K1=newest, K{N}=older. Auto-fixing to K%d-K%d.",
                 text, a, b, b, a,
             )
             a, b = b, a
@@ -489,6 +517,8 @@ def normalize_trace_item(
     normalization_mode: NormalizationMode = "strict",
 ) -> None:
     """Mutate one trace item: answer + bar_range."""
+    if _is_nullish(item.get("node_id")) and not _is_nullish(item.get("node")):
+        item["node_id"] = str(item.get("node", "")).strip()
     _ensure_trace_string_fields(item)
     lenient = normalization_mode == "lenient"
     nid = str(item.get("node_id", "")).strip()
@@ -497,7 +527,7 @@ def normalize_trace_item(
     if nid != str(item.get("node_id", "")).strip():
         item["node_id"] = nid
 
-    if nid == "14":
+    if nid == "14" or (nid.startswith("14") and not nid.startswith("14.")):
         item["node_id"] = "14.1"
         nid = "14.1"
 
@@ -752,7 +782,7 @@ def _repair_gate_result(obj: dict[str, Any]) -> None:
 
     Per prompt rules, gate_result=wait/unknown is only valid for:
     - §1.2 answer≠是 (cannot identify cycle)
-    - §1.3 answer=否 (extreme chaos, extreme_tr)
+    - §1.3 answer=是 (market is extremely chaotic)
 
     If neither condition holds but gate_result is wait/unknown, force to proceed.
     """
@@ -772,7 +802,7 @@ def _repair_gate_result(obj: dict[str, Any]) -> None:
     node_13_block = any(
         isinstance(item, dict)
         and str(item.get("node_id", "")) == "1.3"
-        and str(item.get("answer", "")).strip() == "否"
+        and str(item.get("answer", "")).strip() == "是"
         for item in gate
     )
     if not node_12_block and not node_13_block:
@@ -783,11 +813,46 @@ def _repair_gate_result(obj: dict[str, Any]) -> None:
         )
 
 
+def _strip_program_reference_blocks(text: str) -> str:
+    """Remove merged program-metric blocks from trace reason (§2.5 cleanup)."""
+    cleaned = _PROG_REF_BLOCK_RE.sub("", text or "")
+    return " ".join(cleaned.split()).strip()
+
+
+def _repair_gate_trace_answer_aliases(gate: list[Any]) -> None:
+    """Map gate_result tokens mistakenly written as trace answer (e.g. proceed → 是)."""
+    for item in gate:
+        if not isinstance(item, dict):
+            continue
+        raw = str(item.get("answer", "") or "").strip()
+        mapped = _GATE_RESULT_ANSWER_ALIASES.get(raw.lower())
+        if mapped:
+            item["answer"] = mapped
+            branch = str(item.get("branch", "") or "").strip()
+            if raw.lower() == "proceed" and not branch:
+                item["branch"] = "proceed"
+
+
+def _strip_gate_end_nodes(gate: list[Any]) -> None:
+    """Drop model-invented gate_end / summary nodes from gate_trace."""
+    gate[:] = [
+        item
+        for item in gate
+        if not (
+            isinstance(item, dict)
+            and str(item.get("node_id", "") or "").strip().lower() in _GATE_END_NODE_IDS
+        )
+    ]
+
+
 def _repair_stage1_gate_trace(obj: dict[str, Any]) -> None:
     """Format-only repairs so strict trace semantics pass on good-faith AI output."""
     gate = obj.get("gate_trace")
     if not isinstance(gate, list) or not gate:
         return
+
+    _repair_gate_trace_answer_aliases(gate)
+    _strip_gate_end_nodes(gate)
 
     canonical_q = _canonical_gate_questions()
     for item in gate:
@@ -796,6 +861,11 @@ def _repair_stage1_gate_trace(obj: dict[str, Any]) -> None:
         nid = str(item.get("node_id", "") or "").strip()
         if nid in canonical_q:
             item["question"] = canonical_q[nid]
+        if nid in ("1.3", "2.5"):
+            reason = str(item.get("reason", "") or "")
+            stripped = _strip_program_reference_blocks(reason)
+            if stripped != reason.strip():
+                item["reason"] = stripped
 
     _sync_gate_23_answer_with_direction(obj)
     _repair_gate_result(obj)

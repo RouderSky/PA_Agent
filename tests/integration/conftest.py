@@ -78,7 +78,7 @@ SAMPLE_DECISION_TRACE = [
     },
 ]
 
-SAMPLE_BAR_BY_BAR_SUMMARY = make_bar_by_bar_summary(8)
+SAMPLE_BAR_BY_BAR_SUMMARY = make_bar_by_bar_summary(5)
 
 VALID_STAGE1 = {
     "cycle_position": "normal_channel",
@@ -121,6 +121,7 @@ VALID_STAGE2 = {
         "order_type": "\u7a81\u7834\u5355",
         "entry_price": 2010.5,
         "take_profit_price": 2050.0,
+        "take_profit_price_2": 2090.0,
         "stop_loss_price": 1995.0,
         "entry_basis_bar": "K2",
         "entry_basis_extreme": "high",

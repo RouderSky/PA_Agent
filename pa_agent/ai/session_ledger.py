@@ -55,6 +55,10 @@ class SessionTokenLedger(QObject):
         totals = self.breakdown()
         self.updated.emit(totals)
 
+        # >= 100 means warnings disabled (default 99999999).
+        if self._warn_pct >= 100:
+            return
+
         if pct >= 95.0 and not self._red_fired:
             self._red_fired = True
             logger.warning("Context usage >= 95%% (%.1f%%)", pct)

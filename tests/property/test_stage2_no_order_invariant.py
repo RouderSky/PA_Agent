@@ -12,7 +12,12 @@ from tests.fixtures.validators import schema_test_validator
 validator = schema_test_validator()
 
 _ORDER_TYPES_WITH_TRADE = ["限价单", "突破单", "市价单"]
-_PRICE_FIELDS = ["entry_price", "take_profit_price", "stop_loss_price"]
+_PRICE_FIELDS = [
+    "entry_price",
+    "take_profit_price",
+    "take_profit_price_2",
+    "stop_loss_price",
+]
 _DIRECTION_FIELD = "order_direction"
 
 
@@ -22,6 +27,7 @@ def _base_decision(**overrides) -> dict:
         "order_direction": None,
         "entry_price": None,
         "take_profit_price": None,
+        "take_profit_price_2": None,
         "stop_loss_price": None,
         "reasoning": "test",
         "diagnosis_confidence": 40,
@@ -150,6 +156,7 @@ def test_with_order_all_fields_present_accepted(order_type: str) -> None:
         order_direction="做多",
         entry_price=2650.0,
         take_profit_price=2700.0,
+        take_profit_price_2=2760.0,
         stop_loss_price=2620.0,
         estimated_win_rate=52,
     )
@@ -172,6 +179,7 @@ def test_breakout_order_requires_extreme_basis() -> None:
         order_direction="做多",
         entry_price=2650.0,
         take_profit_price=2700.0,
+        take_profit_price_2=2760.0,
         stop_loss_price=2620.0,
         estimated_win_rate=52,
     )
@@ -189,6 +197,7 @@ def test_breakout_order_direction_extreme_mismatch_auto_corrected() -> None:
         order_direction="做多",
         entry_price=2650.0,
         take_profit_price=2700.0,
+        take_profit_price_2=2760.0,
         stop_loss_price=2620.0,
         estimated_win_rate=52,
         entry_basis_bar="K2",
@@ -213,6 +222,7 @@ def test_with_order_null_price_rejected(order_type: str) -> None:
         order_direction="做多",
         entry_price=None,  # must not be null for 有下单
         take_profit_price=2700.0,
+        take_profit_price_2=2760.0,
         stop_loss_price=2620.0,
     )
     obj = _base_stage2(decision)

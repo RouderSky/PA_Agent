@@ -17,7 +17,9 @@ _CATEGORY_ZH: dict[str, str] = {
 }
 
 _FORBIDDEN_STAGE1 = (
-    "direction / cycle_position / gate_result（除非反馈明确要求修改且你有 K 线依据）",
+    "direction / cycle_position / gate_result（除非反馈明确要求修改且你有 K 线依据；"
+    "增量更新时若新 K 线改变结构，可在 incremental_delta.changed_fields 中列出 direction/"
+    "cycle_position，并用 node_overrides §2.3 说明依据）",
     "bar_by_bar_summary[].bar_type（必须服从程序几何表）",
     "程序锁定节点 §1.1",
 )
@@ -98,6 +100,91 @@ def build_retry_feedback(
     if geo:
         lines.append("")
         lines.append(geo)
+
+    if stage == "stage1" and (
+        any("gate_trace" in inv and "answer" in inv for inv in invalid)
+        or "冲突" in getattr(err, "message", "")
+    ):
+        lines.append("")
+        lines.append("**gate_trace answer 枚举提示：**")
+        lines.append(
+            "- §2.2：`answer` 只能用 **是/否/中性/等待/不适用**；"
+            "「同向/冲突/背景中性」写在 `branch`（如 aligned / conflict / neutral_background），"
+            "**禁止**把「冲突」写在 answer。"
+        )
+
+    if stage == "stage1" and any("node_overrides" in inv and "answer" in inv for inv in invalid):
+        lines.append("")
+        lines.append("**node_overrides answer 枚举提示：**")
+        lines.append(
+            "- `answer` 只能用 **是/否/中性/等待/不适用**（与 gate_trace 相同）；"
+            "**禁止**写「多头/空头/bullish/bearish」等方向词。"
+            "方向信息写在 `branch`（如 bullish / bearish / neutral）。"
+        )
+
+    if stage == "stage1" and any(
+        "bar_by_bar_summary" in inv and "role" in inv for inv in invalid
+    ):
+        lines.append("")
+        lines.append("**bar_by_bar_summary.role 枚举提示：**")
+        lines.append(
+            "- `role` 只能用 **structure / signal / entry / confirmation / noise / trap / climax / test**；"
+            "**禁止**写 support/resistance/continuation 或 detected_patterns 中的形态名。"
+        )
+
+    if stage == "stage1" and any(
+        "bar_by_bar_summary" in inv and "trapped_side" in inv for inv in invalid
+    ):
+        lines.append("")
+        lines.append("**bar_by_bar_summary.trapped_side 枚举提示：**")
+        lines.append(
+            "- `trapped_side` 只能用 **bulls / bears / both / none / unknown**；"
+            "**禁止** null/空值；无明确被套方向时写 **none**。"
+        )
+
+    if stage == "stage1" and any(
+        "bar_by_bar_summary" in inv and "context_effect" in inv for inv in invalid
+    ):
+        lines.append("")
+        lines.append("**bar_by_bar_summary.context_effect 枚举提示：**")
+        lines.append(
+            "- `context_effect` 只能用 **strengthens_bull / weakens_bull / "
+            "strengthens_bear / weakens_bear / neutral / transition**；"
+            "**禁止** strengthens_bash 等拼写错误。"
+        )
+
+    if stage == "stage2" and any("decision.reasoning" in inv for inv in invalid):
+        lines.append("")
+        lines.append("**decision.reasoning 字数提示：**")
+        lines.append(
+            "- `decision.reasoning` **≤280 字**（中文）；只写结论 + 1–2 个关键依据，"
+            "细节放在 decision_trace §10.3 或 key_factors。"
+        )
+
+    if stage == "stage2" and any(
+        "decision_trace" in inv and "answer" in inv for inv in invalid
+    ):
+        lines.append("")
+        lines.append("**decision_trace answer 枚举提示：**")
+        lines.append(
+            "- `answer` 只能用 **是/否/中性/等待/不适用**；"
+            "「部分一致」写 **中性**，「尚需下一根K线确认」写 **等待**；"
+            "**禁止**写「是部分」「部分」「待确认」等。"
+        )
+
+    if category == "a":
+        lines.append("")
+        lines.append("**JSON 语法提示：**")
+        lines.append(
+            "- `content` 必须是**裸 JSON 对象**（以 `{` 开头、以 `}` 结尾），"
+            "**禁止** ` ```json ` 代码围栏或前后缀说明文字。"
+        )
+        prev = (previous_raw or "").strip()
+        if "```" in prev:
+            lines.append(
+                "- 上一轮使用了 markdown 围栏或非 JSON 前缀；请删掉围栏与说明，"
+                "只输出可 `json.loads` 的完整 JSON。"
+            )
 
     lines.append("")
     lines.append(

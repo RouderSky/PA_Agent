@@ -25,6 +25,10 @@ from PyQt6.QtGui import QDesktopServices, QFont
 
 from pa_agent.config.settings import Settings, save_settings
 from pa_agent.config.paths import SETTINGS_JSON_PATH
+from pa_agent.ai.cursor_connector import (
+    is_openclaw_cs_model,
+    should_use_cursor_provider,
+)
 from pa_agent.ai.qclaw_connector import (
     detect_qclaw,
     is_openclaw_model,
@@ -34,6 +38,16 @@ from pa_agent.ai.workbuddy_connector import (
     detect_workbuddy,
     is_openclaw_wb_model,
     should_use_workbuddy_provider,
+)
+from pa_agent.ai.trae_connector import (
+    detect_trae_cn,
+    is_openclaw_twc_model,
+    should_use_trae_cn_provider,
+)
+from pa_agent.ai.qoder_connector import (
+    detect_qoder_cn,
+    is_openclaw_qc_model,
+    should_use_qoder_cn_provider,
 )
 
 _API_KEY_HELP_URL = "https://my.feishu.cn/wiki/CUV1wUKWxiQGhekQdRvcZQQ2ncf"
@@ -174,7 +188,7 @@ class SettingsDialog(QDialog):
         general_form.addRow("重试行为:", self._cancel_keep_on_retry_check)
 
         self._context_warning_spin = QSpinBox()
-        self._context_warning_spin.setRange(1, 100)
+        self._context_warning_spin.setRange(1, 99_999_999)
         self._context_warning_spin.setSuffix(" %")
         general_form.addRow("上下文警告阈值:", self._context_warning_spin)
 
@@ -284,7 +298,7 @@ class SettingsDialog(QDialog):
         )
         self._context_warning_spin.setValue(int(g.context_warning_threshold_pct))
         self._stream_font_spin.setValue(int(getattr(g, "stream_pane_font_pt", 11)))
-        self._chart_seq_font_spin.setValue(int(getattr(g, "chart_seq_label_font_pt", 7)))
+        self._chart_seq_font_spin.setValue(int(getattr(g, "chart_seq_label_font_pt", 11)))
         self._incremental_max_new_bars_spin.setValue(
             int(getattr(g, "incremental_max_new_bars", 10))
         )
@@ -298,7 +312,7 @@ class SettingsDialog(QDialog):
         )
         self._enable_next_bar_check.blockSignals(False)
         self._decision_conf_threshold_spin.setValue(
-            int(getattr(g, "decision_confidence_threshold", 60))
+            int(getattr(g, "decision_confidence_threshold", 40))
         )
         self._last_symbol_edit.setText(g.last_symbol)
         self._last_timeframe_edit.setText(g.last_timeframe)
@@ -314,15 +328,21 @@ class SettingsDialog(QDialog):
             getattr(g, "decision_flow_play_seconds", 50)
         )
         self._flow_default_zoom_spin.setValue(
-            int(getattr(g, "decision_flow_default_zoom_pct", 500))
+            int(getattr(g, "decision_flow_default_zoom_pct", 600))
         )
 
     @staticmethod
     def _validate_provider_fields(model: str, base_url: str) -> str | None:
         """Return user-facing error text, or None if fields look consistent."""
+        if is_openclaw_cs_model(model) or should_use_cursor_provider(model, base_url):
+            return None
         if is_openclaw_model(model) or should_use_qclaw_provider(model, base_url):
             return None
         if is_openclaw_wb_model(model) or should_use_workbuddy_provider(model, base_url):
+            return None
+        if is_openclaw_twc_model(model) or should_use_trae_cn_provider(model, base_url):
+            return None
+        if is_openclaw_qc_model(model) or should_use_qoder_cn_provider(model, base_url):
             return None
         if model.startswith(("http://", "https://")) and not base_url.startswith(
             ("http://", "https://")
@@ -331,7 +351,10 @@ class SettingsDialog(QDialog):
                 "「模型」与「Base URL」似乎填反了：\n"
                 "• 模型应填模型名，如 deepseek-v4-pro 或 claude-sonnet-4-6\n"
                 "• 使用 QClaw 时模型填 openclaw（或 openclaw/main）\n"
+                "• 使用 Cursor 订阅时模型填 openclaw_cs\n"
                 "• 使用 WorkBuddy 时模型填 openclaw_wb\n"
+                "• 使用 TRAE Work CN 时模型填 openclaw_twc\n"
+                "• 使用 Qoder CN 时模型填 openclaw_qc\n"
                 "• Base URL 应填接口地址，如 https://api.deepseek.com"
             )
         if base_url.startswith(("http://", "https://")):
@@ -339,14 +362,30 @@ class SettingsDialog(QDialog):
         if not base_url:
             if detect_qclaw():
                 return (
-                    "请填写 Base URL，或使用 QClaw/WorkBuddy：\n"
-                    "• 模型填 openclaw → 使用 QClaw（保存时自动配置本地网关）\n"
-                    "• 模型填 openclaw_wb → 使用 WorkBuddy（保存时自动配置）"
+                    "请填写 Base URL，或使用 QClaw/WorkBuddy/TRAE Work CN/Qoder CN：\n"
+                    "• 模型填 openclaw → QClaw\n"
+                    "• 模型填 openclaw_cs → Cursor 订阅（经 QClaw 网关）\n"
+                    "• 模型填 openclaw_wb → WorkBuddy\n"
+                    "• 模型填 openclaw_twc → TRAE Work CN\n"
+                    "• 模型填 openclaw_qc → Qoder CN"
                 )
             if detect_workbuddy():
                 return (
-                    "请填写 Base URL，或使用 WorkBuddy：\n"
-                    "• 模型填 openclaw_wb（保存时自动配置 WorkBuddy 端点）"
+                    "请填写 Base URL，或使用 WorkBuddy/TRAE Work CN/Qoder CN：\n"
+                    "• 模型填 openclaw_wb（保存时自动配置 WorkBuddy 端点）\n"
+                    "• 模型填 openclaw_twc → TRAE Work CN\n"
+                    "• 模型填 openclaw_qc → Qoder CN"
+                )
+            if detect_trae_cn():
+                return (
+                    "请填写 Base URL，或使用 TRAE Work CN/Qoder CN：\n"
+                    "• 模型填 openclaw_twc → TRAE Work CN（保存时自动配置）\n"
+                    "• 模型填 openclaw_qc → Qoder CN（保存时自动配置）"
+                )
+            if detect_qoder_cn():
+                return (
+                    "请填写 Base URL，或使用 Qoder CN：\n"
+                    "• 模型填 openclaw_qc → Qoder CN（保存时自动配置）"
                 )
             return "请填写 Base URL（API 接口地址）。"
         return (
@@ -355,7 +394,18 @@ class SettingsDialog(QDialog):
             "PackyAPI 示例：https://www.packyapi.com/v1\n"
             "MiMo 示例：https://api.xiaomimimo.com/v1\n"
             "QClaw：模型填 openclaw 后点保存（自动配置本地网关）\n"
-            "WorkBuddy：模型填 openclaw_wb 后点保存（自动配置 WorkBuddy）"
+            "Cursor：模型填 openclaw_cs 后点保存（经 QClaw 走 Cursor 订阅）\n"
+            "WorkBuddy：模型填 openclaw_wb 后点保存（自动配置 WorkBuddy）\n"
+            "TRAE Work CN：模型填 openclaw_twc 后点保存（自动配置 TRAE Work CN）\n"
+            "Qoder CN：模型填 openclaw_qc 后点保存（自动配置 Qoder CN）"
+        )
+
+    def _apply_cursor_provider(self, *, preferred_model: str = "") -> str | None:
+        from pa_agent.ai.cursor_connector import apply_cursor_provider_to_settings
+
+        return apply_cursor_provider_to_settings(
+            self._settings,
+            preferred_model=preferred_model or None,
         )
 
     def _apply_qclaw_provider(self, *, preferred_model: str = "") -> str | None:
@@ -376,23 +426,63 @@ class SettingsDialog(QDialog):
             preferred_model=preferred_model or None,
         )
 
+    def _apply_trae_cn_provider(self, *, preferred_model: str = "") -> str | None:
+        """Detect TRAE Work CN and write provider fields. Returns error text, or None."""
+        from pa_agent.ai.trae_connector import apply_trae_cn_provider_to_settings
+
+        return apply_trae_cn_provider_to_settings(
+            self._settings,
+            preferred_model=preferred_model or None,
+        )
+
+    def _apply_qoder_cn_provider(self, *, preferred_model: str = "") -> str | None:
+        """Detect Qoder CN and write provider fields. Returns error text, or None."""
+        from pa_agent.ai.qoder_connector import apply_qoder_cn_provider_to_settings
+
+        return apply_qoder_cn_provider_to_settings(
+            self._settings,
+            preferred_model=preferred_model or None,
+        )
+
     def _on_save(self) -> None:
         p = self._settings.provider
         g = self._settings.general
 
         model = self._model_edit.text().strip()
         base_url = self._base_url_edit.text().strip()
+        api_key = self._api_key_edit.text().strip()
 
-        # QClaw (openclaw) before WorkBuddy — stale copilot base_url must not steal routing.
-        if should_use_qclaw_provider(model, base_url):
-            qclaw_err = self._apply_qclaw_provider(preferred_model=model)
-            if qclaw_err:
-                QMessageBox.warning(self, "QClaw 配置异常", qclaw_err)
-                return
-        elif should_use_workbuddy_provider(model, base_url):
+        # Explicit model aliases win over stale base_url (openclaw_wb before openclaw).
+        if is_openclaw_wb_model(model) or should_use_workbuddy_provider(model, base_url):
+            p.api_key = api_key
             wb_err = self._apply_workbuddy_provider(preferred_model=model)
             if wb_err:
                 QMessageBox.warning(self, "WorkBuddy 配置异常", wb_err)
+                return
+        elif is_openclaw_twc_model(model) or should_use_trae_cn_provider(model, base_url):
+            p.api_key = api_key
+            trae_err = self._apply_trae_cn_provider(preferred_model=model)
+            if trae_err:
+                QMessageBox.warning(self, "TRAE Work CN 配置异常", trae_err)
+                return
+        elif is_openclaw_qc_model(model) or should_use_qoder_cn_provider(model, base_url):
+            p.api_key = api_key
+            qc_err = self._apply_qoder_cn_provider(preferred_model=model)
+            if qc_err:
+                QMessageBox.warning(self, "Qoder CN 配置异常", qc_err)
+                return
+        elif is_openclaw_cs_model(model) or should_use_cursor_provider(model, base_url):
+            # Cursor route must keep the user-provided Cursor API key (crsr_...).
+            p.api_key = api_key
+            cs_err = self._apply_cursor_provider(preferred_model=model)
+            if cs_err:
+                QMessageBox.warning(self, "Cursor 配置异常", cs_err)
+                return
+        elif is_openclaw_model(model) or should_use_qclaw_provider(model, base_url):
+            p.api_key = api_key
+            qclaw_err = self._apply_qclaw_provider(preferred_model=model)
+            if qclaw_err:
+                QMessageBox.warning(self, "QClaw 配置异常", qclaw_err)
                 return
         else:
             field_err = self._validate_provider_fields(model, base_url)
@@ -402,10 +492,10 @@ class SettingsDialog(QDialog):
 
             p.model = model
             p.base_url = base_url
-            p.api_key = self._api_key_edit.text()
-            p.thinking = self._thinking_check.isChecked()
-            p.reasoning_effort = self._reasoning_effort_combo.currentText()  # type: ignore[assignment]
-            # context_window is no longer editable in UI; use code-level default
+            p.api_key = api_key
+
+        p.thinking = self._thinking_check.isChecked()
+        p.reasoning_effort = self._reasoning_effort_combo.currentText()  # type: ignore[assignment]
 
         g.analysis_bar_count = self._analysis_bar_count_spin.value()
         g.refresh_interval_ms = self._refresh_interval_spin.value()
@@ -475,7 +565,7 @@ class SettingsDialog(QDialog):
             "获取无限Token方法需付费49.9元，付费后你将获得<br>"
             "Deepseek V4 Pro/GLM5.1/Kimi2.6等\"满血\"模型的无限分析方法<br>"
             "注意无限Token只支持使用这个分析软件<br>"
-            "如果你愿意付费，请联系QQ：564020069<br><br>"
+            "如果你愿意付费，请联系QQ：564020069（付费后提供远程协助部署安装服务）<br><br>"
             "如果你不愿意付费，你可以用自己的模型api，如果你不知道模型api是什么<br>"
             "可以直接跟龙虾说：<br>"
             "PA_Agent这个程序的模型api有什么作用，该怎么填？<br>"

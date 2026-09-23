@@ -149,10 +149,9 @@ def levels_from_stage1_diagnosis(
 def chart_levels_from_stage1_diagnosis(
     stage1: dict[str, Any] | None,
 ) -> list[StructureLevel]:
-    """Return at most one support + one resistance line for the chart (outermost)."""
+    """Return one support + one resistance line for the chart (farthest from price)."""
     if not isinstance(stage1, dict):
         return []
-    out: list[StructureLevel] = []
     supports = stage1.get("support_levels") or []
     resistances = stage1.get("resistance_levels") or []
     if not isinstance(supports, list):
@@ -160,17 +159,31 @@ def chart_levels_from_stage1_diagnosis(
     if not isinstance(resistances, list):
         resistances = []
 
-    if supports:
-        parsed = _parse_prices(str(supports[-1]), "support")
-        if parsed:
-            base = parsed[0]
-            out.append(StructureLevel(base.kind, base.low, base.high, "支撑"))
-    if resistances:
-        parsed = _parse_prices(str(resistances[-1]), "resistance")
-        if parsed:
-            base = parsed[0]
-            out.append(StructureLevel(base.kind, base.low, base.high, "阻力"))
+    out: list[StructureLevel] = []
+    far_support = _farthest_level(supports, "support")
+    if far_support is not None:
+        out.append(far_support)
+    far_resistance = _farthest_level(resistances, "resistance")
+    if far_resistance is not None:
+        out.append(far_resistance)
     return out
+
+
+def _farthest_level(raw_levels: list[Any], kind: str) -> StructureLevel | None:
+    """Pick the structurally farthest level: lowest support / highest resistance."""
+    candidates: list[tuple[float, StructureLevel]] = []
+    for raw in raw_levels:
+        for level in _parse_prices(str(raw), kind):
+            candidates.append((level.price, level))
+    if not candidates:
+        return None
+    if kind == "support":
+        _, base = min(candidates, key=lambda item: item[0])
+        label = "支撑"
+    else:
+        _, base = max(candidates, key=lambda item: item[0])
+        label = "阻力"
+    return StructureLevel(base.kind, base.low, base.high, label)
 
 
 def nearest_support_resistance_labels(

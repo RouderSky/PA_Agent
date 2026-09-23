@@ -16,10 +16,12 @@ def test_normalize_ashare_symbol_stock():
 def test_normalize_ashare_symbol_index():
     assert normalize_ashare_symbol("sh000300") == "sh000300"
     assert normalize_ashare_symbol("000300") == "000300"
+    assert normalize_ashare_symbol("sh000001") == "sh000001"
 
 
 def test_is_index_symbol():
     assert is_index_symbol("000300") is True
+    assert is_index_symbol("sh000001") is True
     assert is_index_symbol("600519") is False
     assert is_index_symbol("000001") is False
 

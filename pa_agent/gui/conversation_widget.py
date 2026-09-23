@@ -13,7 +13,6 @@ from PyQt6.QtWidgets import (
     QLabel,
     QListWidget,
     QListWidgetItem,
-    QMessageBox,
     QPlainTextEdit,
     QProgressBar,
     QPushButton,
@@ -124,7 +123,6 @@ class ConversationWidget(QWidget):
         self._cancel_token: Optional["CancelToken"] = None
         self._worker: Optional[_ChatWorker] = None
         self._sending = False
-        self._red_warned = False
 
         self._turns: list[_TurnRecord] = []
         self._selected_row: int = -1
@@ -471,13 +469,6 @@ class ConversationWidget(QWidget):
 
         if pct >= _RED_PCT:
             self._progress_bar.setStyleSheet(_STYLE_RED)
-            if not self._red_warned:
-                self._red_warned = True
-                QMessageBox.warning(
-                    self,
-                    "上下文用量警告",
-                    f"上下文用量已达 {pct:.1f}%，接近上限，建议开启新会话。",
-                )
         elif pct >= _YELLOW_PCT:
             self._progress_bar.setStyleSheet(_STYLE_YELLOW)
         else:
@@ -519,7 +510,6 @@ class ConversationWidget(QWidget):
         self._stage1_turn = None
         self._stage2_turn = None
         self._chat_turn = None
-        self._red_warned = False
 
         self._show_collapsed_placeholder()
 

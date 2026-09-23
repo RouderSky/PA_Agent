@@ -83,7 +83,7 @@ MT5 必须在运行部署和启动智能体时保持打开且已登录状态。
 - 会自动安装 pyproject.toml 中列出的所有依赖：
   PyQt6, pyqtgraph, numpy, pandas, openai, tiktoken,
   jsonschema, pydantic, MetaTrader5, tvDatafeed,
-  cryptography, pywin32
+  cryptography, pywin32, akshare, baostock, curl_cffi
 
   注意：tvDatafeed 是 TradingView 数据源的核心依赖，
   从 GitHub 安装（git+https），网络环境需能访问 GitHub。
@@ -102,10 +102,11 @@ MT5 必须在运行部署和启动智能体时保持打开且已登录状态。
   python -c "import cryptography; print('cryptography OK')"
   python -c "import win32crypt; print('pywin32 OK')"
   python -c "from tvDatafeed import TvDatafeed; print('tvDatafeed OK')"
+  python -c "import akshare; print('akshare OK')"
+  python -c "import baostock; print('baostock OK')"
+  python -c "import curl_cffi; print('curl_cffi OK')"
 
 预期输出：每行均显示 "xxx OK"
-
-【注意：akshare / baostock 不在当前 GUI 数据源选项中，无需安装，后续维护文档时也不要重新加上】
 
 【故障排查】
 
@@ -298,7 +299,7 @@ if errorlevel 1 (
 6.4 最终验收清单
 
   [ ] python --version 输出 3.11+
-  [ ] 所有核心包导入测试通过（12 个 OK）
+  [ ] 所有核心包导入测试通过（15 个 OK）
   [ ] TradingView 连通性测试通过（若使用 TV 数据源）：
       python -c "from tvDatafeed import TvDatafeed, Interval; df = TvDatafeed().get_hist('XAUUSD', 'OANDA', Interval.in_daily, n_bars=2); print('TV OK:', len(df), 'bars')"
       预期输出：TV OK: 2 bars（若失败，见第三步故障排查 问题 4.5 / 4.6）

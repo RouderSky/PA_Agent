@@ -15,6 +15,11 @@ from zoneinfo import ZoneInfo
 
 from pa_agent.data.base import DataSource, DataSourceTransientError, KlineBar, normalize_kline_bar
 from pa_agent.data.datetime_ts import datetime_to_ts_ms
+from pa_agent.data.ashare_common import (
+    index_symbol_for_api,
+    is_index_symbol,
+    normalize_ashare_symbol,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -40,55 +45,8 @@ _PRESET_SYMBOLS: tuple[str, ...] = (
 )
 
 _STOCK_CODE_RE = re.compile(r"^\d{6}$")
-_INDEX_PREFIX_RE = re.compile(r"^(sh|sz)(\d{6})$", re.IGNORECASE)
 
-
-def normalize_ashare_symbol(symbol: str) -> str:
-    """Normalize user input to AkShare stock code (6 digits) or index id (sh000300)."""
-    raw = (symbol or "").strip()
-    if not raw:
-        return ""
-    m = _INDEX_PREFIX_RE.match(raw)
-    if m:
-        prefix, digits = m.group(1).lower(), m.group(2)
-        if _is_index_digits(digits):
-            return f"{prefix}{digits}"
-        return digits
-    digits = re.sub(r"\D", "", raw)
-    if len(digits) >= 6:
-        return digits[-6:]
-    return digits
-
-
-def _is_index_digits(digits: str) -> bool:
-    return digits in {
-        "000300",
-        "000016",
-        "000905",
-        "000852",
-        "399001",
-        "399006",
-        "399300",
-    }
-
-
-def is_index_symbol(symbol: str) -> bool:
-    """True for sh/sz-prefixed index codes or common CSI/ChiNext codes."""
-    sym = normalize_ashare_symbol(symbol)
-    if sym.startswith(("sh", "sz")) and len(sym) >= 8:
-        return True
-    if _STOCK_CODE_RE.match(sym):
-        return _is_index_digits(sym)
-    return False
-
-
-def _index_symbol_for_api(symbol: str) -> str:
-    sym = normalize_ashare_symbol(symbol)
-    if sym.startswith(("sh", "sz")):
-        return sym
-    if sym.startswith("399"):
-        return f"sz{sym}"
-    return f"sh{sym}"
+_index_symbol_for_api = index_symbol_for_api
 
 
 def _cn_now() -> datetime:
@@ -128,7 +86,7 @@ def _row_time_to_ts_ms(value: Any) -> int:
     text = str(value).strip()
     for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
         try:
-            dt = datetime.strptime(text[: len(fmt)], fmt).replace(tzinfo=_CN_TZ)
+            dt = datetime.strptime(text, fmt).replace(tzinfo=_CN_TZ)
             return int(dt.timestamp() * 1000)
         except ValueError:
             continue

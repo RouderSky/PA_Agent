@@ -33,6 +33,15 @@ _PROCEED_FINAL_TOKENS = (
     "proceed",
 )
 
+_REASON_REQUIRED_NODE_IDS = frozenset({"10.3"})
+
+
+def _trace_reason_required(item: dict[str, Any]) -> bool:
+    """Return True when this trace node must have non-empty reason text."""
+    nid = str(item.get("node_id", "") or "").strip()
+    return nid in _REASON_REQUIRED_NODE_IDS
+
+
 _ORDER_SECTION_9_REQUIRED = frozenset({"9.0", "9.1", "9.2", "9.3", "9.4", "9.5", "9.6", "9.7"})
 _PRICE_IN_REASON_RE = re.compile(r"\d+(?:\.\d+)?")
 
@@ -139,9 +148,12 @@ def validate_trace_semantics(
             continue
 
         reason = str(item.get("reason", "") or "").strip()
-        if not reason:
-            errors.append(f"{path_prefix}[{i}].reason: required non-empty string")
-        elif reason in _BOILERPLATE_REASONS:
+        if _trace_reason_required(item):
+            if not reason:
+                errors.append(f"{path_prefix}[{i}].reason: required non-empty string")
+            elif reason in _BOILERPLATE_REASONS:
+                errors.append(f"{path_prefix}[{i}].reason: boilerplate text not allowed")
+        elif reason and reason in _BOILERPLATE_REASONS:
             errors.append(f"{path_prefix}[{i}].reason: boilerplate text not allowed")
 
         if reason:
@@ -204,6 +216,27 @@ def validate_stage2_order_trace_semantics(stage2: dict[str, Any]) -> list[str]:
     has_9 = any(n.startswith("9.") for n in node_ids)
     if not has_9:
         errors.append("placing an order requires decision_trace nodes in §9 (9.x)")
+
+    item_90 = next(
+        (x for x in trace if isinstance(x, dict) and str(x.get("node_id")) == "9.0"),
+        None,
+    )
+    item_90p = next(
+        (x for x in trace if isinstance(x, dict) and str(x.get("node_id")) == "9.0P"),
+        None,
+    )
+    if (
+        decision.get("order_type") == "限价单"
+        and isinstance(item_90, dict)
+        and str(item_90.get("answer", "") or "").strip() in ("否", "等待")
+        and not (
+            isinstance(item_90p, dict)
+            and str(item_90p.get("answer", "") or "").strip() == "是"
+        )
+    ):
+        errors.append(
+            "limit order with §9.0=否/等待 requires §9.0P=是 (background limit path)"
+        )
 
     for required in ("10.1", "10.2", "10.3"):
         if required not in node_ids:

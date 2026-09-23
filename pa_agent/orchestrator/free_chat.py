@@ -325,10 +325,10 @@ class FreeChatSession:
         history_for_api.append({"role": "user", "content": user_content})
 
         # ── 2. Resolve reasoning_effort ───────────────────────────────────────
-        reasoning_effort = "max"
+        reasoning_effort = "high"
         if self._settings is not None:
             reasoning_effort = getattr(
-                self._settings.provider, "reasoning_effort", "max"
+                self._settings.provider, "reasoning_effort", "high"
             )
 
         # ── 3. Check cancellation before API call ─────────────────────────────

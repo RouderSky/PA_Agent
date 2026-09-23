@@ -45,6 +45,10 @@ _H1H2_FILE = "文件19-H1H2-L1L2计数.txt"
 _ALWAYS_IN_FILE = "文件20-AlwaysIn与20GB.txt"
 _BARBWIRE_FILE = "文件21-铁丝网与无交易环境.txt"
 _MAGNET_FILE = "文件22-信号失败后的磁力位.txt"
+_MTR_FILE = "文件25-主要趋势反转MTR.txt"
+_FINAL_FLAG_FILE = "文件24-最终旗形与趋势末端.txt"
+_TRIANGLE_FILE = "文件27-三角形与收敛形态.txt"
+_DOUBLE_TOP_BOTTOM_FILE = "文件28-双重顶底与微型结构.txt"
 
 # All valid file names (used for dedup validation)
 _ALL_VALID_FILES: frozenset[str] = frozenset([
@@ -52,6 +56,7 @@ _ALL_VALID_FILES: frozenset[str] = frozenset([
     "市场诊断框架.txt",
     "文件16-K线信号识别.txt",
     "文件17-止损和止盈与仓位管理.txt",
+    "文件23-MeasuredMove与结构目标.txt",
     "上涨通道分析识别.txt",
     "上涨通道交易策略.txt",
     "文件13-窄通道与宽通道策略.txt",
@@ -70,6 +75,10 @@ _ALL_VALID_FILES: frozenset[str] = frozenset([
     "文件20-AlwaysIn与20GB.txt",
     "文件21-铁丝网与无交易环境.txt",
     "文件22-信号失败后的磁力位.txt",
+    "文件24-最终旗形与趋势末端.txt",
+    "文件25-主要趋势反转MTR.txt",
+    "文件27-三角形与收敛形态.txt",
+    "文件28-双重顶底与微型结构.txt",
 ])
 
 _CHANNEL_STATES = frozenset(["micro_channel", "tight_channel", "normal_channel", "broad_channel"])
@@ -120,6 +129,10 @@ def route_strategy_files(stage1_json: dict[str, Any]) -> list[str]:
         or "l2" in patterns
     ):
         files.append(_REVERSAL_FILE)
+    if "mtr" in patterns:
+        files.append(_MTR_FILE)
+    if "final_flag" in patterns:
+        files.append(_FINAL_FLAG_FILE)
     if cp in _CHANNEL_STATES or any(p in patterns for p in ("h1", "h2", "l1", "l2")):
         files.append(_H1H2_FILE)
     if any(
@@ -136,6 +149,18 @@ def route_strategy_files(stage1_json: dict[str, Any]) -> list[str]:
         for p in ("failed_signal", "breakout_failure", "failed_breakout", "magnet", "trapped_traders")
     ):
         files.append(_MAGNET_FILE)
+    if any(
+        p in patterns
+        for p in (
+            "ascending_triangle",
+            "descending_triangle",
+            "symmetrical_triangle",
+            "expanding_triangle",
+        )
+    ):
+        files.append(_TRIANGLE_FILE)
+    if "double_top_bottom" in patterns:
+        files.append(_DOUBLE_TOP_BOTTOM_FILE)
 
     # ── Stable dedup (preserve first occurrence) ──────────────────────────────
     seen: set[str] = set()
@@ -165,6 +190,12 @@ def _base_files_for_cycle(
     # ── Channel states ────────────────────────────────────────────────────────
     if cp in _CHANNEL_STATES:
         files.extend(_channel_files(direction))
+        # micro_channel is often spike on the signal window; load spike playbooks when active/ending.
+        if cp == "micro_channel" and spike_stage in ("active", "ending"):
+            if direction == "bullish":
+                files.extend(_BULLISH_SPIKE_FILES)
+            elif direction == "bearish":
+                files.extend(_BEARISH_SPIKE_FILES)
 
     # ── Spike state ───────────────────────────────────────────────────────────
     elif cp == "spike":
@@ -173,7 +204,7 @@ def _base_files_for_cycle(
         elif direction == "bearish":
             files.extend(_BEARISH_SPIKE_FILES)
         else:
-            logger.warning("Spike with neutral direction — no spike strategy files loaded")
+            logger.info("Spike with neutral direction — no spike strategy files loaded")
         if spike_stage == "ending":
             files.extend(_channel_files(direction))
 
@@ -186,7 +217,13 @@ def _base_files_for_cycle(
         pass  # no strategy files — do not trade
 
     else:
-        logger.warning("Unknown cycle_position %r — no strategy files loaded", cp)
+        logger.warning(
+            "Unknown cycle_position %r — no strategy files loaded. "
+            "If this is a pattern name (e.g. 'descending_triangle'), it belongs in "
+            "detected_patterns, not cycle_position. "
+            "Run normalize_stage1() before route_strategy_files() to auto-correct.",
+            cp,
+        )
 
     return files
 
@@ -200,7 +237,7 @@ def _channel_files(direction: str) -> list[str]:
     else:
         # Neutral in a channel: skip directional channel files, but preload
         # range strategy for boundary planned-limit setups (§9.0 path).
-        logger.warning(
+        logger.info(
             "Channel-like state with neutral direction — "
             "no directional channel files; loading range strategy for boundary setups"
         )

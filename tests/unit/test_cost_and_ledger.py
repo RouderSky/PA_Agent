@@ -51,6 +51,14 @@ def test_red_threshold_at_95_pct():
     assert any(e[0] == "red" for e in events)
 
 
+def test_warnings_disabled_when_threshold_at_max():
+    ledger = SessionTokenLedger(context_window=1000, warn_pct=99_999_999.0)
+    events: list[tuple[str, dict]] = []
+    ledger.threshold_crossed.connect(lambda level, data: events.append((level, data)))
+    ledger.add(_usage(950, 50))
+    assert events == []
+
+
 def test_reset_clears_counters():
     ledger = SessionTokenLedger(context_window=1000)
     ledger.add(_usage(500, 100))

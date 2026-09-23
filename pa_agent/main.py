@@ -10,8 +10,13 @@ logger = logging.getLogger(__name__)
 
 
 def main(argv: list[str] | None = None) -> int:
-    # Logging is configured inside AppContext.bootstrap() with the real API key
-    # for masking. No need to call configure_logging() here separately.
+    # Early diagnostics before Qt / heavy imports: crash dumps + file logging.
+    from pa_agent.util.crash_diagnostics import enable_crash_diagnostics, log_startup_diagnostics
+    from pa_agent.util.logging import configure_logging
+
+    enable_crash_diagnostics()
+    configure_logging()
+    log_startup_diagnostics()
 
     argv = list(sys.argv if argv is None else argv)
     app = QApplication(argv)
@@ -28,8 +33,10 @@ def main(argv: list[str] | None = None) -> int:
 
     # Update logging with the real API key now that settings are loaded
     if ctx.settings is not None:
-        from pa_agent.util.logging import update_api_key
-        update_api_key(ctx.settings.provider.api_key)
+        from pa_agent.util.logging import configure_logging, update_api_key
+        configure_logging(api_key=ctx.settings.provider.api_key)
+        from pa_agent.util.crash_diagnostics import log_startup_diagnostics
+        log_startup_diagnostics()
 
     # Build and show the main window
     from pa_agent.gui.main_window import MainWindow

@@ -41,6 +41,11 @@ _DIRECTION_PREFIX_ZH: dict[str, str] = {
     "neutral": "震荡",
 }
 
+# Range-style cycles: structure is sideways; direction refines the bias.
+RANGE_DISPLAY_CYCLES: frozenset[str] = frozenset(
+    {"trading_range", "extreme_tr", "trending_tr"}
+)
+
 
 # ── Public helpers ────────────────────────────────────────────────────────────
 
@@ -77,3 +82,38 @@ def format_cycle_with_direction(
     d = (direction or "").strip().lower()
     prefix = _DIRECTION_PREFIX_ZH.get(d, "")
     return f"{prefix}{base}" if prefix else base
+
+
+def format_trend_label(
+    direction: str | None,
+    cycle_position: str | None,
+) -> str:
+    """Map direction + cycle to a short trend label for the GUI.
+
+    Range cycles keep the sideways structure but expose directional bias:
+      - bearish + trading_range → 震荡偏空
+      - bullish + trading_range → 震荡偏多
+      - neutral/missing + trading_range → 震荡
+
+    Channel/spike cycles use directional trend labels when available.
+    """
+    cp = (cycle_position or "").strip().lower()
+    d = (direction or "").strip().lower()
+
+    if cp in RANGE_DISPLAY_CYCLES:
+        if d == "bullish":
+            return "震荡偏多"
+        if d == "bearish":
+            return "震荡偏空"
+        return "震荡"
+
+    if d == "bullish":
+        return "上涨"
+    if d == "bearish":
+        return "下跌"
+    if d == "neutral":
+        return "震荡"
+
+    if cp in ("spike", "micro_channel", "tight_channel"):
+        return "趋势运行中"
+    return "—"

@@ -14,6 +14,7 @@ from PyQt6.QtGui import (
     QPainter,
     QPainterPath,
     QPen,
+    QShowEvent,
 )
 from PyQt6.QtWidgets import (
     QDialog,
@@ -774,6 +775,19 @@ def _build_playback_path(placed: list[_Placed], *, total_steps: int) -> list[QPo
     return dense
 
 
+class _DecisionFlowGraphicsView(QGraphicsView):
+    """Graphics view that re-applies default zoom once the viewport has a real size."""
+
+    def __init__(self, scene: QGraphicsScene, owner: "DecisionFlowVizPanel") -> None:
+        super().__init__(scene)
+        self._owner = owner
+
+    def resizeEvent(self, event) -> None:  # noqa: ANN001, N802
+        super().resizeEvent(event)
+        if self._owner._needs_initial_refit:
+            self._owner.schedule_refit_view()
+
+
 class DecisionFlowVizPanel(QWidget):
     """Branched flowchart of the AI walk (yes=右 / no=左)."""
 
@@ -794,9 +808,14 @@ class DecisionFlowVizPanel(QWidget):
         self._play_active = False
         self._last_placed: list[_Placed] = []
         self._last_rect = QRectF(-400, 0, 800, 200)
+        self._refit_timer = QTimer(self)
+        self._refit_timer.setSingleShot(True)
+        self._refit_timer.timeout.connect(self._try_refit_view)
+        self._refit_attempts = 0
+        self._needs_initial_refit = False
 
         self._scene = _FlowScene()
-        self._view = QGraphicsView(self._scene)
+        self._view = _DecisionFlowGraphicsView(self._scene, self)
         self._view.viewport().installEventFilter(self)
         self._view.setRenderHints(
             QPainter.RenderHint.Antialiasing | QPainter.RenderHint.SmoothPixmapTransform
@@ -865,6 +884,33 @@ class DecisionFlowVizPanel(QWidget):
     def bind_settings(self, settings: Any) -> None:
         """Receive persisted settings (auto-play toggle)."""
         self._settings = settings
+        self.schedule_refit_view()
+
+    def schedule_refit_view(self, *, delay_ms: int = 0) -> None:
+        """Defer refit until the graphics view has a real viewport size."""
+        if self._last_trace_kw is None and not self._last_placed:
+            return
+        self._refit_attempts = 0
+        self._refit_timer.start(max(0, delay_ms))
+
+    def _try_refit_view(self) -> None:
+        if self._play_active:
+            return
+        if self._last_trace_kw is None and not self._last_placed:
+            return
+        if not self.isVisible():
+            return
+        vp = self._view.viewport()
+        if vp.width() < 8 or vp.height() < 8:
+            self._refit_attempts += 1
+            if self._refit_attempts < 30:
+                self._refit_timer.start(100)
+            return
+        self.refit_view()
+
+    def showEvent(self, event: QShowEvent) -> None:  # noqa: N802
+        super().showEvent(event)
+        self.schedule_refit_view()
 
     def should_auto_play_after_load(self) -> bool:
         """Whether to switch tab and play when new trace data is loaded."""
@@ -901,8 +947,8 @@ class DecisionFlowVizPanel(QWidget):
     def _default_zoom_factor(self) -> float:
         """Scale applied after fitInView (1.0 = fit size; no upper cap—uses settings % / 100)."""
         if self._settings is None:
-            return 5.0
-        pct = int(getattr(self._settings.general, "decision_flow_default_zoom_pct", 500))
+            return 6.0
+        pct = int(getattr(self._settings.general, "decision_flow_default_zoom_pct", 600))
         return max(0.25, pct / 100.0)
 
     def eventFilter(self, obj: Any, event: QEvent) -> bool:  # noqa: N802
@@ -950,6 +996,7 @@ class DecisionFlowVizPanel(QWidget):
         if self._play_index >= len(self._play_points):
             self._stop_playback()
             self._play_status.setText("播放完成")
+            self.refit_view()
             self.playback_finished.emit()
 
     def wheelEvent(self, event: Any) -> None:  # noqa: N802
@@ -961,12 +1008,19 @@ class DecisionFlowVizPanel(QWidget):
         super().wheelEvent(event)
 
     def _fit_scene(self, rect: QRectF) -> None:
-        self._view.resetTransform()
-        self._view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
+        view = self._view
+        view.resetTransform()
+        transform_anchor = view.transformationAnchor()
+        resize_anchor = view.resizeAnchor()
+        view.setTransformationAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        view.setResizeAnchor(QGraphicsView.ViewportAnchor.AnchorViewCenter)
+        view.fitInView(rect, Qt.AspectRatioMode.KeepAspectRatio)
         z = self._default_zoom_factor()
         if abs(z - 1.0) > 1e-6:
-            self._view.scale(z, z)
-        self._view.centerOn(rect.center())
+            view.scale(z, z)
+        view.centerOn(rect.center())
+        view.setTransformationAnchor(transform_anchor)
+        view.setResizeAnchor(resize_anchor)
 
     def _render_hud(
         self,
@@ -1026,10 +1080,18 @@ class DecisionFlowVizPanel(QWidget):
         QTimer.singleShot(180, panel.play_path)
         dlg.exec()
 
+    def refit_view(self) -> None:
+        """Re-apply default zoom (e.g. after user changes decision_flow_default_zoom_pct)."""
+        if self._last_trace_kw is None and not self._last_placed:
+            return
+        self._fit_scene(self._last_rect)
+        self._needs_initial_refit = False
+
     def clear(self) -> None:
         self._stop_playback()
         self._last_trace_kw = None
         self._last_placed = []
+        self._needs_initial_refit = False
         self._scene.clear()
         self._render_hud(merged=[], terminal=None)
         hint = _EmptyHint("等待分析…\n提交后将显示左右分支决策流程图")
@@ -1146,6 +1208,8 @@ class DecisionFlowVizPanel(QWidget):
         self._scene.setSceneRect(rect)
         self._last_placed = placed
         self._last_rect = rect
+        self._needs_initial_refit = True
         self._fit_scene(rect)
+        self.schedule_refit_view()
         self._play_status.setText("")
         return bool(placed)

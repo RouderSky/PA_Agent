@@ -62,7 +62,7 @@ class ChartWidget(pg.PlotWidget):
         self._sr_items: list[pg.GraphicsItem] = []  # support/resistance level lines
         self._pending_decision: dict | None = None
         self._direction_items: list[pg.GraphicsItem] = []
-        self._seq_label_font_pt: int = 7
+        self._seq_label_font_pt: int = 11
         self._fit_on_next_render: bool = False
         self._first_frame_fitted: bool = False
 
@@ -152,21 +152,32 @@ class ChartWidget(pg.PlotWidget):
 
     def set_decision(self, decision: dict) -> None:
         """Draw or clear entry/TP/SL lines and direction marker from the AI decision."""
-        self._pending_decision = decision
         order_type = decision.get("order_type", _NO_ORDER_TEXT)
-        if order_type == _NO_ORDER_TEXT:
+        overlay_active = bool(decision.get("chart_overlay_active"))
+
+        if order_type == _NO_ORDER_TEXT and not overlay_active:
+            self._pending_decision = None
             self._overlay.clear_lines(self)
             self._clear_direction_marker()
-            self._pending_decision = None
             return
 
+        self._pending_decision = decision
         entry = decision.get("entry_price")
         tp = decision.get("take_profit_price")
+        tp2 = decision.get("take_profit_price_2")
         sl = decision.get("stop_loss_price")
 
         if entry is not None and tp is not None and sl is not None:
             try:
-                self._overlay.set_lines(self, float(entry), float(tp), float(sl))
+                tp2_val = float(tp2) if tp2 is not None else None
+                self._overlay.set_lines(
+                    self,
+                    float(entry),
+                    float(tp),
+                    float(sl),
+                    tp2=tp2_val,
+                    continuity=overlay_active,
+                )
             except (TypeError, ValueError):
                 self._overlay.clear_lines(self)
         else:
@@ -442,7 +453,12 @@ class ChartWidget(pg.PlotWidget):
 
         decision = self._pending_decision
         if decision is not None:
-            for key in ("entry_price", "take_profit_price", "stop_loss_price"):
+            for key in (
+                "entry_price",
+                "take_profit_price",
+                "take_profit_price_2",
+                "stop_loss_price",
+            ):
                 raw = decision.get(key)
                 if raw is None:
                     continue
@@ -481,7 +497,10 @@ class ChartWidget(pg.PlotWidget):
         frame = self._latest_frame
         if decision is None or frame is None:
             return
-        if decision.get("order_type", _NO_ORDER_TEXT) == _NO_ORDER_TEXT:
+        if (
+            decision.get("order_type", _NO_ORDER_TEXT) == _NO_ORDER_TEXT
+            and not decision.get("chart_overlay_active")
+        ):
             return
 
         entry = decision.get("entry_price")

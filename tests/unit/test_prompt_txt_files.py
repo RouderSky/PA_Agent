@@ -51,5 +51,5 @@ def test_stage2_txt_files_order() -> None:
     expected_user = stage2_user_task_txt_files(routed, direction="neutral")
     assert files == [*COMMON_SYSTEM_STAGE2_TXT_FILES, *expected_user]
     assert files[:2] == list(COMMON_SYSTEM_STAGE2_TXT_FILES)
-    assert files[-3:] == list(STAGE2_BASE_PROMPT_TXT_FILES)
+    assert files[-4:] == list(STAGE2_BASE_PROMPT_TXT_FILES)
     assert routed[0] in files
