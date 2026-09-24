@@ -35,7 +35,7 @@ def _derive_record_id(record: AnalysisRecord) -> str:
 
     ms = record.meta.timestamp_local_ms
     dt = datetime.fromtimestamp(ms / 1000, tz=timezone.utc).astimezone()
-    ts_str = dt.strftime("%Y-%m-%d_%H-%m-%S")
+    ts_str = dt.strftime("%Y-%m-%d_%H-%M-%S")
     symbol = record.meta.symbol
     timeframe = record.meta.timeframe
     return f"{ts_str}_{symbol}_{timeframe}"
